@@ -28,7 +28,12 @@ services:
   buddy-switch:
     # 预构建镜像。名字必须与 .github/workflows/docker.yml 的 `IMAGE` 逐字一致
     # （`scripts/check-docker.cjs` 会校验，连 README 与 docs/guides/DOCKER.md 一起）。
-    image: ghcr.io/nextagentx/buddy-switch:latest
+    # tag 可由环境变量覆盖（写在同目录 `.env` 或命令行前置均可）：
+    #   BUDDY_SWITCH_TAG=edge        # 跟 master 最新提交走
+    #   BUDDY_SWITCH_TAG=2026.11.161428
+    # 默认 `latest` = 最近一次 tag 发布。⚠️ tag 换成 `edge` 后**必须**保证包是 Public，
+    # 否则匿名 pull 403 → Compose 静默回落成本地构建（见 docs/guides/DOCKER.md）。
+    image: ghcr.io/khoandev/buddy-switch:${BUDDY_SWITCH_TAG:-latest}
     # 源码构建 fallback：只有 pull 不到时才用到，见文件头。
     build:
       context: .

@@ -18,7 +18,9 @@
 //   ④ `.dockerignore` **必须**排除 `dist/` —— 否则宿主机那份旧前端可能被编进二进制，
 //      表现为「页面正常但内容是旧的」。
 //   ⑥ 发布工作流（`.github/workflows/docker.yml`）里的**镜像名**必须与
-//      `docker-compose.yml` / `README.md` / `README.en.md` / `docs/guides/DOCKER.md` 逐字一致。
+//      `docker-compose.yml` / `README.md` / `README.en.md` / `docs/guides/DOCKER.md` 一致
+//      （字面量直接比；`ghcr.io/${{ github.repository_owner }}/...` 则先按 origin 解析
+//      owner 再比，见下方 `OWNER_EXPRESSION`）。
 //      漂移的症状极隐蔽：compose 拉不到镜像就**静默回落成本地构建**，
 //      用户只看到「很慢」，看不到「错」。同一个工作流还必须留 `packages: write`，
 //      少了它只有到打 tag 那一轮才会 403。
@@ -228,19 +230,60 @@ const DOCKER_GUIDE = path.join(ROOT, "docs", "guides", "DOCKER.md");
 
 let publishedImage = null;
 
-// `.github` 在 `.dockerignore` 里被排除 —— 镜像内跑 `npm run build` 时本目录**不存在**，
-// 这是**预期**状态，不是缺失。只有「本目录存在但工作流文件不见了」才算失败。
+// 工作流里的镜像名有**两种合法写法**：
+//
+//   字面量   IMAGE: ghcr.io/khoandev/buddy-switch
+//   表达式   IMAGE: ghcr.io/${{ github.repository_owner }}/buddy-switch
+//
+// 表达式形态的意义是「fork 到自己账号下不用改文件」，代价是比对前必须先解析出 owner。
+// owner 只从 `git remote get-url origin` 推导：本地 checkout 有 `.git`，而镜像构建上下文
+// 里没有（`.dockerignore` 排除），那时**只跳过跨文件比对**并留一条 note ——
+// 不能因为「查不到 owner」就把构建判红。
+const OWNER_EXPRESSION = /\$\{\{\s*github\.repository_owner\s*\}\}/;
+
+function resolveRepositoryOwner() {
+  try {
+    const { execFileSync } = require("child_process");
+    const url = execFileSync("git", ["remote", "get-url", "origin"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    // git@github.com:Owner/repo.git   |   https://github.com/Owner/repo(.git)
+    const parsed = /github\.com[:/]+([^/]+)\//.exec(url);
+    return parsed ? parsed[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// `.github` **不**在 `.dockerignore` 里（`check:npm-platforms` / `check:pages-base` / 本文件
+// 都要读它），所以镜像内跑 `npm run build` 时本目录是**存在**的。只有「本目录在但工作流
+// 文件不见了」才算失败。
 if (!fs.existsSync(WORKFLOWS_DIR)) {
   notes.push("跳过镜像名校验：构建上下文里没有 .github（.dockerignore 已排除）");
 } else {
   const workflow = read(DOCKER_WORKFLOW);
   if (workflow) {
-    const match = workflow.match(/^\s*IMAGE:\s*(\S+)\s*$/m);
+    const match = workflow.match(/^\s*IMAGE:\s*(.+?)\s*$/m);
     if (!match) {
       fail("`.github/workflows/docker.yml` 里找不到 `IMAGE:` —— 镜像名必须只有一处定义");
     } else {
-      publishedImage = match[1];
-      if (publishedImage !== publishedImage.toLowerCase()) {
+      const declared = match[1];
+      if (OWNER_EXPRESSION.test(declared)) {
+        const owner = resolveRepositoryOwner();
+        if (owner) {
+          publishedImage = declared.replace(OWNER_EXPRESSION, owner);
+        } else {
+          notes.push(
+            "跳过镜像名的跨文件校验：`IMAGE` 用了 ${{ github.repository_owner }}，但这里读不到 origin remote",
+          );
+        }
+      } else {
+        publishedImage = declared;
+      }
+
+      if (publishedImage && publishedImage !== publishedImage.toLowerCase()) {
         fail(`镜像名 \`${publishedImage}\` 含大写 —— docker 会判 invalid reference format`);
       }
       // `packages: write` 少了的话，构建能一路绿到 push 才 403（release 才暴露）。
@@ -252,33 +295,35 @@ if (!fs.existsSync(WORKFLOWS_DIR)) {
         fail("`.github/workflows/docker.yml` 没有 `on.push.tags: [\"v*\"]` —— 打 tag 不会发布镜像");
       }
 
-      // compose：`image:` 必须指向同一个名字（tag 随意），且**保留** `build:` 作为回落。
-      const composeImageMatch = /^\s*image:\s*(\S+)\s*$/m.exec(compose || "");
-      if (!composeImageMatch) {
-        fail("docker-compose.yml 里没有 `image:` —— `up -d` 会变成纯源码构建");
-      } else {
-        const composeImage = composeImageMatch[1];
-        if (!composeImage.startsWith(`${publishedImage}:`)) {
-          fail(
-            `docker-compose.yml 的 image \`${composeImage}\` 与工作流发布的 \`${publishedImage}\` 不一致` +
-              "（症状：拉不到镜像 → 静默回落成本地构建）",
-          );
-        } else if (!/^\s*build:\s*$/m.test(compose)) {
-          fail("docker-compose.yml 丢了 `build:` —— 离线 / 拉不到镜像时没有任何来源码构建的入口");
+      if (publishedImage) {
+        // compose：`image:` 必须指向同一个名字（tag 随意），且**保留** `build:` 作为回落。
+        const composeImageMatch = /^\s*image:\s*(\S+)\s*$/m.exec(compose || "");
+        if (!composeImageMatch) {
+          fail("docker-compose.yml 里没有 `image:` —— `up -d` 会变成纯源码构建");
         } else {
-          notes.push(`镜像名一致：${publishedImage}`);
+          const composeImage = composeImageMatch[1];
+          if (!composeImage.startsWith(`${publishedImage}:`)) {
+            fail(
+              `docker-compose.yml 的 image \`${composeImage}\` 与工作流发布的 \`${publishedImage}\` 不一致` +
+                "（症状：拉不到镜像 → 静默回落成本地构建）",
+            );
+          } else if (!/^\s*build:\s*$/m.test(compose)) {
+            fail("docker-compose.yml 丢了 `build:` —— 离线 / 拉不到镜像时没有任何来源码构建的入口");
+          } else {
+            notes.push(`镜像名一致：${publishedImage}`);
+          }
         }
-      }
 
-      // 文档：README 是「发现 Docker 入口」的唯一地方，部署指南是唯一细节来源。
-      for (const [label, file] of [
-        ["README.md", README],
-        ["README.en.md", README_EN],
-        ["docs/guides/DOCKER.md", DOCKER_GUIDE],
-      ]) {
-        const source = read(file);
-        if (source && !source.includes(publishedImage)) {
-          fail(`${label} 里没有出现镜像名 \`${publishedImage}\` —— 用户无从知道该拉什么`);
+        // 文档：README 是「发现 Docker 入口」的唯一地方，部署指南是唯一细节来源。
+        for (const [label, file] of [
+          ["README.md", README],
+          ["README.en.md", README_EN],
+          ["docs/guides/DOCKER.md", DOCKER_GUIDE],
+        ]) {
+          const source = read(file);
+          if (source && !source.includes(publishedImage)) {
+            fail(`${label} 里没有出现镜像名 \`${publishedImage}\` —— 用户无从知道该拉什么`);
+          }
         }
       }
     }

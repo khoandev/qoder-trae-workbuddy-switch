@@ -10,18 +10,29 @@ name: docker
 #
 # ## 镜像坐标
 #
-#   ghcr.io/nextagentx/buddy-switch
+#   ghcr.io/<repository_owner>/buddy-switch   （当前：ghcr.io/khoandev/buddy-switch）
 #
-# ⚠️ 必须**全小写**：镜像名大写会被 docker 直接判 `invalid reference format`。
-# 因此这里**不写** `${{ github.repository_owner }}`（那是 `NextAgentX` 大写），
-# 而是硬编码小写。`scripts/check-docker.cjs` 会校验这串名字与 `docker-compose.yml`、
-# `README.md`、`README.en.md`、`docs/guides/DOCKER.md` 完全一致 —— 四处漂移的症状是
-# 「compose 拉不到 → 静默回落成本地构建」，用户只会觉得慢，不会觉得错。
+# owner 来自 `env.IMAGE`（`${{ github.repository_owner }}`），fork 到自己账号下**不用改
+# 任何文件**就能推到自己的 GHCR；写死别人的账号名会在 push 阶段 403。
+#
+# ⚠️ 必须**全小写**：镜像名含大写会被 docker 判 `invalid reference format`。
+# `github.repository_owner` 保留原始大小写（上游是 `NextAgentX`），所以 build 的第一步
+# 有一道「镜像名全小写」断言 —— 配置错了立刻红，不必先花十几分钟编译再等 push 失败。
+#
+# `scripts/check-docker.cjs` 会校验这串名字与 `docker-compose.yml`、`README.md`、
+# `README.en.md`、`docs/guides/DOCKER.md` 逐字一致；它认识这个表达式，按 `origin` remote
+# 的 owner 解析出实际值再比对（镜像构建上下文里没有 `.git`，那时只跳过跨文件比对）。
+# 改镜像名的唯一动作是改**这里**，然后跑 `npm run check:docker` 按报错补齐那四处 ——
+# 四处漂移的症状是「compose 拉不到 → 静默回落成本地构建」，用户只会觉得慢，不会觉得错。
 #
 # ## 标签
 #
 #   tag 推送 v2026.10.191740   →  2026.10.191740 · 2026.10 · latest
+#   push 到 master            →  edge
 #   手动触发 workflow_dispatch →  edge
+#
+# `latest` **只**由 semver tag 产出（`flavor: latest=auto`）：master 上的构建进 `edge`，
+# 因此「合并即部署」不会把未发布的提交推给所有 `pull :latest` 的人。
 #
 # ## 版本戳：**只在 tag 触发时**盖
 #
@@ -32,8 +43,10 @@ name: docker
 # 退出码 0、**不写文件**）—— 文件仍是上一个已提交的版本，`npm run build` 的门禁在
 # docker build 里红，而错误信息只说「内置说明是 vA 而应用版本是 vB」。2026-10-19 实测踩过。
 #
-# 所以：tag 触发盖戳（tag 存在，脚本能拿到区间）；手动触发**不盖**，直接用仓库里
-# 已提交且彼此一致的那一对版本 —— `edge` 镜像报的是「最后一次提交时的版本」，不是编造的时间戳。
+# 所以：tag 触发盖戳（tag 存在，脚本能拿到区间）；master 推送与手动触发**都不盖**，
+# 直接用仓库里已提交且彼此一致的那一对版本 —— `edge` 镜像报的是「该提交时的版本」，
+# 不是编造的时间戳。（master 上同样没有「本次构建」对应的 ref，盖了会让
+# `gen-release-notes.mjs` 走降级分支，最终在 docker build 的门禁处红。）
 #
 # ## 架构
 #
@@ -47,25 +60,34 @@ name: docker
 
 on:
   push:
+    # `branches` 与 `tags` 同时存在时是 **OR**：分支推送只看 branches，tag 推送只看 tags
+    # （tag 推送不会被 branches 过滤掉）。
+    branches: [master]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
-  # 推送 `ghcr.io/<owner>/...` 需要的唯一权限。GITHUB_TOKEN 的作用域就是本仓库，
-  # 因此这个包会自动挂在本仓库下（配合 build 阶段打的 `org.opencontainers.image.source`
-  # 标签），不需要额外的 PAT。
+  # 推送 `ghcr.io/<owner>/buddy-switch` 需要的唯一权限。GITHUB_TOKEN 的作用域就是本仓库，
+  # 因此这个包会自动挂在本仓库下（`docker/metadata-action` 会按 `github.repository`
+  # 自动补 `org.opencontainers.image.source` 标签），不需要额外 PAT —— fork 也不用配 secret。
   packages: write
 
-# 同一 tag 的重复推送（打错 tag、删了重打）取消旧 run；但**不**取消进行中的
-# tag 发布 —— 半途取消会留下「某个 arch 已经推了 digest、manifest 却没拼」的悬空层，
-# 虽不致命，但会让 registry 里多一份无主的 blob。tag 构建本来就慢，重复触发罕见。
+# 并发按 **ref** 分组，之间互不干扰（推 tag 不会取消 master 的构建，反之亦然）。
+#
+# - 分支（master）：后到的提交**顶掉**排队/进行中的旧提交。master 每推一次就是一次
+#   全量双架构 Rust 构建（十几分钟起），串行跑完每个中间提交毫无意义。
+# - tag：**不**取消。半途取消会留下「某个 arch 已推 digest、manifest 却没拼」的悬空层，
+#   虽不致命，但 registry 里会多一份无主的 blob；而打错 tag 重推本来就罕见。
 concurrency:
   group: docker-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
+# 镜像坐标全局只定义**这一处**：下面所有 `docker/*` 动作与 `imagetools` 都引用
+# `${{ env.IMAGE }}`，不要在别处再写一遍——两份字面量漂移的结果是「推的是一份、
+# 校验/拉的是另一份」。
 env:
-  IMAGE: ghcr.io/nextagentx/buddy-switch
+  IMAGE: ghcr.io/${{ github.repository_owner }}/buddy-switch
 
 jobs:
   # ===========================================================================
@@ -87,6 +109,16 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
+      # 镜像名必须全小写（见文件头「镜像坐标」），已知本仓 owner 就是全小写，
+      # 这里只是把「用别名/fork 带大写」的配置错误提前到第一步。
+      - name: Assert lowercase image reference
+        shell: bash
+        run: |
+          echo "IMAGE=$IMAGE"
+          case "$IMAGE" in
+            *[A-Z]*) echo "::error::IMAGE 含大写字母：$IMAGE（docker 会判 invalid reference format）"; exit 1 ;;
+          esac
+
       # `fetch-depth: 0` + `fetch-tags: true`：`gen-release-notes.mjs` 要
       # `git log <上一个 tag>..<本次 tag>`，浅克隆会缺对象（与 build.yml 的 release
       # job 同因）。缺了不报错，只会退化成「没有变更清单」的说明。
@@ -134,7 +166,9 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
+            # 非 tag 的 ref（master 推送 / 手动触发）一律落在 `edge`。`latest` 不在这里，
+            # 见 `flavor: latest=auto` —— 未发布的 master 提交不该顶替 `latest`。
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' || !startsWith(github.ref, 'refs/tags/') }}
           # 不覆盖会被仓库描述顶掉（那份描述讲的是**桌面 App**，与这个 headless 镜像不符），
           # 许可证也会落成 NOASSERTION。包页面上第一眼看到的就是这两项。
           labels: |
@@ -206,7 +240,9 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
+            # 非 tag 的 ref（master 推送 / 手动触发）一律落在 `edge`。`latest` 不在这里，
+            # 见 `flavor: latest=auto` —— 未发布的 master 提交不该顶替 `latest`。
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' || !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Create manifest list
         working-directory: ${{ runner.temp }}/digests

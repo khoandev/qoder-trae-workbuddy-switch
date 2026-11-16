@@ -189,7 +189,7 @@ flowchart TB
 | --- | --- | --- |
 | **桌面 App** | [GitHub Releases](https://github.com/NextAgentX/qoder-trae-workbuddy-switch/releases/latest) 下载安装包 | Tauri 打包，推荐日常使用 |
 | **webui** | [Releases 的 CLI 裸二进制](docs/guides/LINUX-WEBUI-FALLBACK.md)或从源码构建（见下） | 与桌面 App 同一份前端产物，走本地 HTTP 通道 |
-| **Docker** | 拉预构建镜像 `ghcr.io/nextagentx/buddy-switch`（amd64 / arm64） | 容器内是 **headless 服务端**（webui + API 网关），**不是**桌面切换器；见 [Docker 部署](docs/guides/DOCKER.md) |
+| **Docker** | 拉预构建镜像 `ghcr.io/khoandev/buddy-switch`（amd64 / arm64） | 容器内是 **headless 服务端**（webui + API 网关），**不是**桌面切换器；见 [Docker 部署](docs/guides/DOCKER.md) |
 | **在线演示** | [GitHub Pages](https://nextagentx.github.io/qoder-trae-workbuddy-switch/) | 只读演示，账号与用量均为虚构数据 |
 
 > Linux 上若桌面「创建密钥」弹窗无响应，可改用 [本机 WebUI 备用方案](docs/guides/LINUX-WEBUI-FALLBACK.md)。

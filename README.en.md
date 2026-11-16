@@ -191,7 +191,7 @@ flowchart TB
 | --- | --- | --- |
 | **Desktop app** | Download from [GitHub Releases](https://github.com/NextAgentX/qoder-trae-workbuddy-switch/releases/latest) | Packaged with Tauri; recommended for daily use |
 | **webui** | [CLI binary from Releases](docs/guides/LINUX-WEBUI-FALLBACK.md) or build from source (below) | Same frontend bundle as the desktop app, served over local HTTP |
-| **Docker** | Pull the prebuilt image `ghcr.io/nextagentx/buddy-switch` (amd64 / arm64) | The container runs the **headless server** (webui + API gateways), **not** the desktop switcher; see [Docker deployment](docs/guides/DOCKER.md) |
+| **Docker** | Pull the prebuilt image `ghcr.io/khoandev/buddy-switch` (amd64 / arm64) | The container runs the **headless server** (webui + API gateways), **not** the desktop switcher; see [Docker deployment](docs/guides/DOCKER.md) |
 | **Online demo** | [GitHub Pages](https://nextagentx.github.io/qoder-trae-workbuddy-switch/) | Read-only demo; accounts and usage are fictional |
 
 > Linux desktop **Create API Key** dialog not showing? See the [local WebUI fallback guide](docs/guides/LINUX-WEBUI-FALLBACK.md) (Chinese).

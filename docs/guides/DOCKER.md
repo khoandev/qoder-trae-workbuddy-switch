@@ -33,7 +33,7 @@ docker run -d --name buddy-switch \
   -p 127.0.0.1:57890:57890 \
   -v buddy-switch-data:/data \
   --restart unless-stopped \
-  ghcr.io/nextagentx/buddy-switch:latest
+  ghcr.io/khoandev/buddy-switch:latest
 # 打开 http://127.0.0.1:57890
 ```
 
@@ -56,26 +56,58 @@ docker compose down                   # 停止（命名卷里的数据保留）
 
 | 标签 | 含义 |
 |:---|:---|
-| `latest` | 最近一次 **tag 发布**（不等于 `main` 最新代码） |
+| `latest` | 最近一次 **tag 发布**（**不**等于 `master` 最新代码） |
 | `2026.10.191740` | 与 Releases 的 tag 一一对应（去掉 `v` 前缀），镜像内 `buddy-switch version` 报告的就是它 |
 | `2026.10` | 该月的最后一次发布 |
-| `edge` | **手动触发**工作流构建的当前分支，只用于验证，不保证可用 |
+| `edge` | `master` 的最新提交（push 到 master 或手动触发都会更新），不保证可用 |
 
 架构：`linux/amd64` + `linux/arm64`，同一个 tag 下是一条多架构 manifest list，
 `docker pull` 会按当前机器自动选。**没有** `arm/v7`（32 位 ARM 请自行改 Dockerfile 构建）。
 
-标签由 `.github/workflows/docker.yml` 在推 `v*` tag 时自动发布（两个架构各跑一台**原生**
-runner，再由 merge job 拼 manifest）。手动触发该工作流只产出 `edge`。
+标签由 `.github/workflows/docker.yml` 发布（两个架构各跑一台**原生** runner，再由 merge
+job 拼 manifest）：
+
+| 触发 | 产出 |
+|:---|:---|
+| 推 `v*` tag | 版本号 + `<年>.<月>` + `latest` |
+| push 到 `master` | `edge`（**不**动 `latest`） |
+| 手动 `workflow_dispatch` | `edge` |
+
+想跟 `master` 走（「合并即部署」）—— `docker-compose.yml` 的 tag 已可用环境变量覆盖：
+
+```bash
+BUDDY_SWITCH_TAG=edge docker compose pull && docker compose up -d
+# 或写进同目录 .env：BUDDY_SWITCH_TAG=edge（之后普通 up -d 也拉 edge）
+```
+
+⚠️ `edge` 的版本号是**该提交时仓库里已提交的版本**，不是构建时刻的时间戳 —— `master`
+构建**不盖版本戳**（盖了会让 `gen-release-notes.mjs` 拿不到 git 区间，反而在 `docker build`
+的门禁处红）。连续 push 时旧构建会被新提交**取消**（同 ref 的 concurrency），
+所以 `edge` 只保证**最后那次**提交。
 
 ### 镜像可见性
 
-本仓是公开仓库，包也按 **Public** 发布 —— 2026-10-19 实测匿名 token 可直接拉到 manifest
-（`ghcr.io/v2/nextagentx/buddy-switch/manifests/edge` 返回 200）。
+⚠️ **个人账号下首次发布的包默认是 Private**（GitHub 文档原话：*"When you first publish a
+package that is scoped to your personal account, the default visibility is private"*）。
+Private 包匿名拉不到，而 `docker compose up -d` 拉不到时会**静默回落到本地构建** ——
+症状是「卡了好几分钟才开始编译」，不是报错。
 
-若某次之后 `docker pull` 报 `denied` / `unauthorized`，到
-`https://github.com/orgs/NextAgentX/packages/container/buddy-switch/settings`
-确认 Visibility 仍是 Public。改成 Private 也能用，只是每台机器都要先 `docker login ghcr.io`；
-而 `docker compose up -d` 拉不到时会**静默回落到本地构建**（看起来像「卡住了」）。
+所以**第一次推送成功后要做一次**：到
+`https://github.com/users/khoandev/packages/container/buddy-switch/settings`
+→ Danger Zone → Change visibility → **Public**（改成 Public 不可逆）。
+
+验证匿名可拉（不带任何凭据）：
+
+```bash
+docker logout ghcr.io    # 确保不是靠本地登录态在兜底
+docker pull ghcr.io/khoandev/buddy-switch:latest
+```
+
+若仍报 `denied` / `unauthorized`，查两处：包设置里 Visibility 是否真的是 Public；
+以及该 tag 是否**真的发过**（`edge` 只在手动触发时产出，`latest` 只在推 `v*` tag 时产出）。
+
+> 对照上游：`ghcr.io/nextagentx/buddy-switch` 已于 2026-10-19 实测为 Public；本仓的
+> `khoandev` 包是**新建的**，不继承那个状态。
 
 ---
 
@@ -265,7 +297,7 @@ runtime  (debian:12) →  二进制 + ca-certificates + curl
 
 ### 发布路径（CI）
 
-`.github/workflows/docker.yml` 在推 `v*` tag 时自动发布 `ghcr.io/nextagentx/buddy-switch`：
+`.github/workflows/docker.yml` 在推 `v*` tag 时自动发布 `ghcr.io/khoandev/buddy-switch`：
 
 1. **版本戳只在 tag 触发时盖**（`stamp-version.sh --tag "$GITHUB_REF_NAME"`）：两个架构各跑一次，
    但取值来自同一个 tag，结果一致。手动触发**不盖** —— `gen-release-notes.mjs` 是按 tag 取提交
@@ -286,10 +318,10 @@ runtime  (debian:12) →  二进制 + ca-certificates + curl
 
 | 症状 | 原因 | 处理 |
 |:---|:---|:---|
-| `up -d` 不下载镜像、直接开始**编译**（几分钟后才起来） | 预构建镜像没拉到（包私有 / 网络不通 / 该 tag 还没发布），Compose 回落成本地构建 | 先单独 `docker pull ghcr.io/nextagentx/buddy-switch:latest` 看真实报错；私有包需 `docker login ghcr.io`，或把包改成 Public |
+| `up -d` 不下载镜像、直接开始**编译**（几分钟后才起来） | 预构建镜像没拉到（包私有 / 网络不通 / 该 tag 还没发布），Compose 回落成本地构建 | 先单独 `docker pull ghcr.io/khoandev/buddy-switch:latest` 看真实报错；私有包需 `docker login ghcr.io`，或把包改成 Public |
 | `docker pull` 报 `denied` / `unauthorized` | 包被改成 Private；或登录用的 Token 没有 `read:packages` | 见「镜像可见性」一节 |
 | `no matching manifest for linux/arm/v7` | 只发布了 `amd64` / `arm64` | 32 位 ARM 自行 `docker compose up -d --pull build` 本地构建 |
-| 镜像版本与 tag 对不上 | 用了 `latest`，而它不是这次的 tag | 显式拉 `ghcr.io/nextagentx/buddy-switch:<版本>` |
+| 镜像版本与 tag 对不上 | 用了 `latest`，而它不是这次的 tag | 显式拉 `ghcr.io/khoandev/buddy-switch:<版本>` |
 | 容器起来后**立刻退出**，日志说「拒绝启动」 | `BUDDY_SWITCH_HOME` 不存在 / 非绝对路径 / 无写权限 | 检查卷挂载与属主（见「数据持久化」） |
 | 宿主访问不到 `57890` | 容器内仍绑 `127.0.0.1` | 确认 `BUDDY_SWITCH_HOST=0.0.0.0` 已生效 |
 | 页面 **404** 或空白 | 前端没编进二进制 | 检查构建顺序；`docker build` 有无跳过阶段 1 |
