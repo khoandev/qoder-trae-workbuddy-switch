@@ -110,15 +110,12 @@ fn school_ok(status: u16, resp: &Value) -> bool {
     status == 200 && matches!(resp.get("code").and_then(Value::as_i64), Some(0) | None)
 }
 
-/// 小程序域请求头附加项（带小程序 UA 与站点 Origin/Referer）。
+/// 小程序域请求头附加项（小程序 UA + 站点 Origin/Referer）。
+///
+/// 取值与顺序都出自 [`crate::modules::outbound_headers::mp`]：UA 常量、头名大小写
+/// 只有那一处知道，本文件不再拼字面量。
 fn school_extra(region: Region) -> HashMap<String, String> {
-    const MP_UA: &str = "Mozilla/5.0 (Linux; Android 14; MicroMessenger/8.0.49 WeChat/0.8.0 MiniProgramEnv/android; wkbrowser xweb)";
-    let base = region_spec(region).billing_base;
-    let mut headers = HashMap::new();
-    headers.insert("user-agent".to_string(), MP_UA.to_string());
-    headers.insert("origin".to_string(), base.to_string());
-    headers.insert("referer".to_string(), format!("{base}/"));
-    headers
+    crate::modules::outbound_headers::mp(region_spec(region).billing_base).to_map()
 }
 
 // ---------------------------------------------------------------------------

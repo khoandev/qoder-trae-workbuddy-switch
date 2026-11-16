@@ -151,16 +151,15 @@ fn reward_gate() -> &'static DailyGate {
 // ---------------------------------------------------------------------------
 
 /// growth / chat 域请求头附加项（与出行中心同域，带 Origin/Referer/web 标识）。
+///
+/// 形态由 [`crate::modules::outbound_headers::campaign_portal`] 给：`x-client-platform` /
+/// `origin` / `referer` 只在那张表里写一次，活动门户与猫猫领奖共用同一套。
 fn growth_extra(region: Region) -> HashMap<String, String> {
-    let base = region_spec(region).billing_base;
-    let mut headers = HashMap::new();
-    headers.insert("x-client-platform".to_string(), "web".to_string());
-    headers.insert("origin".to_string(), base.to_string());
-    headers.insert(
-        "referer".to_string(),
-        format!("{base}/profile/growth-center"),
-    );
-    headers
+    crate::modules::outbound_headers::campaign_portal(
+        region_spec(region).billing_base,
+        crate::modules::outbound_headers::GROWTH_CENTER_PATH,
+    )
+    .to_map()
 }
 
 async fn billing_post(region: Region, path: &str, body: Value, account: &Value) -> (u16, Value) {

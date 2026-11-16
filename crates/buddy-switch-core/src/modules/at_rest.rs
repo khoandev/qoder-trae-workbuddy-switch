@@ -40,7 +40,7 @@ use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use aes_gcm::aead::AeadInPlace;
+use aes_gcm::aead::{AeadCore, AeadInPlace, OsRng};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -295,6 +295,38 @@ pub fn decrypt_field(envelope_b64: &str, protector_key: &[u8; 32]) -> Result<Str
         )
         .map_err(|_| AtRestError::Integrity)?;
     String::from_utf8(buffer).map_err(|e| AtRestError::Envelope(format!("明文非 UTF-8：{e}")))
+}
+
+/// 用**同一套信封格式**封一个字段（本仓自用，例如 `egress` 的代理凭据）。
+///
+/// 与 [`decrypt_field`] 严格互逆：同一个 `protector_key` ⇒ `seal_field` 的产物能被
+/// `decrypt_field` 解开。**密钥不由本函数保管**：调用方自己决定（`egress` 用本机
+/// `~/.buddy-switch/egress_key.json` 的随机 32B），所以这条路径与官方客户端的 build key
+/// 无关，也不需要探针子进程。
+///
+/// 注意：`Aes256Gcm` 每次加密必须用**新 nonce**（12B）。这里用 `OsRng` 生成，重复概率可忽略；
+/// 千万不要为了「可复现测试」把 nonce 固定 —— 那等于 GCM 的 nonce 复用，直接毁掉保密性。
+pub fn seal_field(plaintext: &str, protector_key: &[u8; 32]) -> Result<String, AtRestError> {
+    let key_id = key_id_for(protector_key);
+    let cipher = Aes256Gcm::new_from_slice(protector_key)
+        .map_err(|e| AtRestError::Envelope(format!("密钥长度不对：{e}")))?;
+    let aad = build_field_aad(&key_id, SUPPORTED_SUITE);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let mut buffer = plaintext.as_bytes().to_vec();
+    // ★ 与解密侧同一纪律：**detached** 接口，tag 独立成字段。
+    let tag = cipher
+        .encrypt_in_place_detached(&nonce, &aad, &mut buffer)
+        .map_err(|_| AtRestError::Integrity)?;
+    let envelope = serde_json::json!({
+        "suite": SUPPORTED_SUITE,
+        "keyId": key_id,
+        "nonce": B64.encode(nonce),
+        "authTag": B64.encode(tag),
+        "ciphertext": B64.encode(&buffer),
+    });
+    let raw = serde_json::to_vec(&envelope)
+        .map_err(|e| AtRestError::Envelope(format!("信封序列化失败：{e}")))?;
+    Ok(B64.encode(raw))
 }
 
 /// 客户端可执行文件路径（Windows 为 exe；macOS 为 `.app` 内的可执行体）。

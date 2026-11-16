@@ -12,7 +12,8 @@ use crate::modules::account::{
     build_auth_headers, envelope_refresh_error, load_accounts_for, upsert_account_for,
 };
 use crate::modules::config::{
-    http_request, load_checkin_config, norm_ts, now_ms, RunFlagGuard, WORKBUDDY_API_PREFIX,
+    http_request, http_request_with_client, load_checkin_config, norm_ts, now_ms, RunFlagGuard,
+    WORKBUDDY_API_PREFIX,
 };
 use crate::modules::region::{region_spec, Region};
 
@@ -182,7 +183,28 @@ pub async fn refresh_account_token_for(region: Region, mut account: Value) -> Va
         "{}{WORKBUDDY_API_PREFIX}/auth/token/refresh",
         region_spec(region).billing_base
     );
-    let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
+    // ★ 刷新走**账号级出口**（`egress`）：绑了槽就从槽出去，没绑就走**改造前的直连路径**
+    //   （`http_request`，一个字节都没换）—— 与任务链、其它需要账号身份的请求同一条线路。
+    //   解析失败**不回落直连**（否则同一账号的请求会从两个公网出口出现，正好破坏隔离）；
+    //   错误串只含槽 id，不含凭据。
+    let resp = match crate::modules::egress::resolve_account(&account).slot() {
+        None => http_request(&url, "POST", Some(json!({})), Some(&headers)).await,
+        Some(_) => match crate::modules::egress::client_for_account(&account) {
+            Ok(client) => {
+                http_request_with_client(&client, &url, "POST", Some(json!({})), Some(&headers)).await
+            }
+            Err(error) => {
+                // **不当作 Token 失效**：出口的问题修好就能继续，别逼用户重登。
+                // 只记一条日志就原样返回账号，不写 `needs_relogin_reason`（那是凭据坏了
+                // 才会有的标记，写错了会把用户引向「重新扫码」这条错误的修法）。
+                crate::modules::runtime_log::warn(
+                    "refresh",
+                    format!("egress unavailable, refresh not attempted: {error}"),
+                );
+                return account;
+            }
+        },
+    };
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     let reason = resp
         .get("message")

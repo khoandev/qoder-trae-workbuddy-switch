@@ -20,7 +20,10 @@ use crate::modules::net;
 use crate::modules::region::{region_spec, CatalogUa, Region};
 
 /// 共享 CLI 形态 UA（刷新 / CN 目录使用）。
-pub const CLIENT_UA: &str = "CLI/2.63.2 CodeBuddy/2.63.2";
+///
+/// 取值只有一处：`outbound_headers::CLI_USER_AGENT`。这里保留旧名是给既有调用点与
+/// 后续 UI/日志引用的稳定别名，**不要**再在本文件写第二份字面量。
+pub const CLIENT_UA: &str = crate::modules::outbound_headers::CLI_USER_AGENT;
 
 /// 错误响应体读取上限（字节）。
 const ERROR_BODY_LIMIT: usize = 4096;
@@ -366,6 +369,7 @@ pub enum UpstreamChatResult {
 
 /// 上游 HTTP 客户端。一个实例服务整个网关；凭据逐请求传入。
 pub struct UpstreamClient {
+    /// **默认出口**（网关共享）：未绑定出口槽的账号用它，行为与今日逐字一致。
     http: reqwest::Client,
 }
 
@@ -375,10 +379,26 @@ impl UpstreamClient {
         Self { http }
     }
 
-    /// 所有账号复用网关共享出口；账号配置中的旧代理映射不会参与路由。
+    /// 取该账号的出口客户端。
+    ///
+    /// 三级回落，顺序不可颠倒：
+    /// 1. 账号绑定了 `automation.egress_slot` 且槽启用 ⇒ 用**按槽缓存**的客户端
+    ///    （`egress::client_for_account`），连接池与凭据解封都在那一层；
+    /// 2. 未绑定 / 槽被删 / 槽被禁用 ⇒ 网关共享出口 [`UpstreamClient::http`]，
+    ///    也就是 `upstream_via_proxy` 那个全局开关决定的客户端；
+    /// 3. 绑定存在但解不开（槽表损坏、密钥换了）⇒ **报错**，不回落到共享出口：
+    ///    否则这个账号的流量会从另一个公网出口再出现一次，正好破坏隔离。
+    ///
+    /// ★ 这是旧 `upstream_via_proxy`（全局一个开关）与新的**账号级**槽的接缝：
+    /// 全局开关保留为「兜底出口」，账号一旦绑定槽就以槽为准。
     fn client_for_account(&self, acc: &Value) -> Result<reqwest::Client, String> {
-        let _ = acc;
-        Ok(self.http.clone())
+        // 只读一次槽表：`resolve_account` 已经把「未绑定 / 槽被删 / 槽被禁用」都收敛成
+        // `Resolution::direct()`，所以这里只判 `slot()` 有没有值。
+        let resolution = crate::modules::egress::resolve_account(acc);
+        if resolution.slot().is_none() {
+            return Ok(self.http.clone());
+        }
+        crate::modules::egress::client_for(&resolution)
     }
 
     /// POST chat 端点；成功返回原始 SSE 响应。
@@ -1028,17 +1048,8 @@ impl UpstreamClient {
 
 /// 共享 CLI 请求头（刷新 / 目录使用）。
 fn common_headers(region: Region) -> HashMap<String, String> {
-    let origin = region_spec(region).billing_base;
-    let mut headers = HashMap::new();
-    headers.insert(
-        "Accept".to_string(),
-        "application/json, text/plain, */*".to_string(),
-    );
-    headers.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
-    headers.insert("Origin".to_string(), origin.to_string());
-    headers.insert("Referer".to_string(), format!("{origin}/"));
-    headers.insert("User-Agent".to_string(), CLIENT_UA.to_string());
-    headers
+    // CLI 形态的取值与顺序都在 `outbound_headers`（`CLI_USER_AGENT` 也在那里）。
+    crate::modules::outbound_headers::cli(region_spec(region).billing_base).to_map()
 }
 
 /// 解析上游 JSON envelope（必须是对象）。

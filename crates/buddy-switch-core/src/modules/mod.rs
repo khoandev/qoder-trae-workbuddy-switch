@@ -54,6 +54,9 @@ pub mod cst;
 // 由 HKDF-SHA256(安装盐, uid, realm) 派生，安装盐 0600 落盘且不进备份/导出。
 // 唯一挂载点是 `task_io::send`；依据 `docs/specs/WB-AUTOMATION-ARCH.md` §7.1。
 pub mod device_identity;
+// 账号级**出口槽**（`egress_slot`，opt-in、缺省直连）：槽表 + 凭据 at-rest 加密 +
+// 按槽缓存的 `reqwest::Client`。挂载点见 `WB-AUTOMATION-ARCH.md` §7.2。
+pub mod egress;
 pub mod error_code;
 pub mod export_import;
 pub mod identity;
@@ -66,6 +69,9 @@ pub mod migrate;
 pub mod net;
 pub mod oauth;
 pub mod official_usage;
+// 出站请求头：桌面 / CLI / 小程序 / 活动门户 / 对话 SSE 五种形态各一张**有序**表，
+// UA 与版本只从 `identity` / `config` 取。依据 `WB-AUTOMATION-ARCH.md` §7.4。
+pub mod outbound_headers;
 pub mod process;
 pub mod product;
 // P5 §2.5 · WorkBuddy 程序位表（`ProgramSpec` + `ProgramAdapter` trait）—— 表驱动 + 统一操作面。

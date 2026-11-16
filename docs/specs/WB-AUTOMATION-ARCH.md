@@ -212,7 +212,8 @@ task kernel（纯函数）
 
 ### 7.2 账号出口（`egress_slot`）与出口退避（`egress_backoff`）
 
-- 槽表是**用户自己的命名代理列表**（`name` / `url` / `enabled` / 探测结果 `ip` / `country` / `asn`），
+- 槽表是**用户自己的命名代理列表**（`label` / `scheme` + `host` + `port` / 加密凭据 /
+  `region` 提示 / `enabled`；落盘时的真实字段集见 §7.2.1），
   账号绑定的是**槽 id**，不是 URL 字符串 —— 改 URL 不改变绑定，删槽必须显式解绑。
 - 槽 id **单调分配、不复用**：否则删掉 `slot-2` 再新建会把所有绑 `slot-2` 的账号**静默改道**。
 - 出口退避按**出口**而不是按账号计数：同一出口上的失败属于同一条链路；
@@ -244,6 +245,40 @@ task kernel（纯函数）
   `task_io::outbound_headers`。
 - **代理凭据（用户名/密码）只存本地文件、只进 reqwest 的 `socks`/`http` 配置**；
   日志与错误串一律打码成 `socks5://***@host:port`（见 §8）。
+- 出口槽：`crates/buddy-switch-core/src/modules/egress.rs` —— 槽模型
+  （`id` / `label` / `scheme` = `http|https|socks5|socks5h` / `host` / `port` /
+  `credential`（at-rest 信封）/ `region` / `enabled`）、`EgressTable`（`slot-N` **单调发号**，
+  `next_index` 手改小也不复用）、按槽缓存的 `reqwest::Client`（缓存键 = 槽 id + 代理地址摘要，
+  改 URL 自动换客户端）。
+- 落盘：槽表 `~/.buddy-switch/egress_slots.json`；凭据密钥
+  `~/.buddy-switch/egress_key.json`（0600，随机 32B）。凭证用 `at_rest::seal_field`
+  封成**与客户端同格式**的字段信封（AES-256-GCM），明文只在建连那一刻存在于内存。
+  两者**都不进备份 / 导出 / 诊断包**（备份是表驱动分区，这里刻意不加分区）；
+  密钥文件损坏时**不重新生成**（否则既有密文永久解不开），只报错。
+- 与设备身份**分成两把钥匙**：清理设备身份（换指纹）不该让代理凭据变成解不开的密文，反之亦然。
+- 账号绑定：`automation.egress_slot`（只存槽 id）。解析规则：未绑定 / 槽被删 /
+  槽 `enabled=false` / 槽 id 非法 ⇒ `Resolution::direct()`（**与改造前逐字相同**）；
+  绑定存在但解不开（槽表损坏、密钥换了）⇒ **报错，不回落直连** —— 否则同一账号的流量
+  会从两个公网出口出现，正好破坏隔离。
+- 挂载点（内核侧三条，别再开第四条）：
+
+  | 路径 | 函数 |
+  |:--|:--|
+  | 任务链写请求（成长 / 小程序 / 活动 / 盲盒） | `task_io::send` → `config::authed_json_request_for` → `config::http_request_raw_for_account` |
+  | Token 刷新 | `refresh::refresh_account_token_for` |
+  | 签到（状态查询 / 执行） | `checkin::checkin_request_for` |
+  | 网关中继 | `upstream::UpstreamClient::client_for_account` |
+
+- **`upstream_via_proxy` 的新地位**：保留为「网关共享兜底出口」（未绑定槽的账号用它，
+  行为与改造前一致），不再是唯一出口；账号一旦绑定槽就以槽为准。
+- **测试**：`cargo test -p buddy-switch-core --lib modules::egress`。含 scheme / 默认端口、
+  槽校验（host 里混凭据、坏端口、只填半个用户名）、`slot-N` 单调且不复用、凭据封存后
+  **盘上无明文**且能解回、未绑定默认直连 + 解析失败 fail-closed、绑定一个账号不影响其他账号、
+  按槽缓存且改 URL 换客户端、凭据打码（IPv6 也带方括号、URL 里不带凭据）。
+- **登录（扫码 / OAuth）不走槽**：那一刻还没有账号记录，也就没有 `automation.egress_slot`
+  可读；要覆盖登录流量必须先选槽、后登录，属 UI 侧顺序问题，本期不做。
+- **尚未落地**：AccountsPage 的槽管理与绑定 UI、§7.3 的出口 IP 探测（`region` 字段目前
+  只用于展示，不参与路由判定）。
 
 ### 7.3 地区面板（`client_geo`）
 

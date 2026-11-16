@@ -446,6 +446,23 @@ pub fn reward_gate_file() -> PathBuf {
 }
 
 /// 设备身份派生的**安装盐**（`device_identity` 开关用，见 `device_identity.rs`）。
+/// 出口槽的**凭据加密密钥**（32B，hex 落盘，0600；见 `egress.rs`）。
+///
+/// 与设备身份的安装盐**分开两把钥匙**：两者生命周期不同 —— 用户清理设备身份（换指纹）
+/// 不该让代理凭据变成解不开的密文，反之亦然。
+///
+/// 只存本机：**不进备份包、不进导出、不进诊断包**（备份是表驱动分区，这里刻意不加分区）。
+pub fn egress_key_file() -> PathBuf {
+    store_dir().join("egress_key.json")
+}
+
+/// 出口槽表（`egress_slots.json`）：槽定义 + 凭据信封。**不含明文凭据**。
+///
+/// 与 [`egress_key_file`] 同一纪律：不进备份、不进导出。账号记录里只存槽 id
+/// （`automation.egress_slot`），所以把槽表拷到别的机器上只会得到「用不了的空绑定」。
+pub fn egress_slots_file() -> PathBuf {
+    store_dir().join("egress_slots.json")
+}
 ///
 /// 只存本机：**不进备份包、不进导出、不进诊断包**（备份是表驱动分区，这里刻意不加分区）。
 /// 文件由 `atomic_write` 落盘，权限 0600（`write_private_file`）。
@@ -1146,7 +1163,7 @@ pub fn norm_ts(v: Option<&Value>) -> Option<i64> {
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-fn http_client_builder() -> reqwest::ClientBuilder {
+pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(DEFAULT_HTTP_USER_AGENT)
@@ -1165,7 +1182,7 @@ fn http_client() -> &'static reqwest::Client {
 /// 只用于「环境代理连不上」时的兜底重试 —— 见 [`http_request_with_proxy`] 的说明。
 static DIRECT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-fn direct_client() -> &'static reqwest::Client {
+pub(crate) fn direct_client() -> &'static reqwest::Client {
     DIRECT_CLIENT.get_or_init(|| {
         http_client_builder()
             .no_proxy()
@@ -1197,7 +1214,6 @@ pub async fn http_request_with_proxy(
     headers: Option<&HashMap<String, String>>,
     proxy: Option<&str>,
 ) -> Value {
-    let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
     let explicit_proxy = proxy.map(str::trim).filter(|value| !value.is_empty());
     let client = match explicit_proxy {
         Some(proxy) => match http_client_builder()
@@ -1215,6 +1231,23 @@ pub async fn http_request_with_proxy(
         None => direct_client().clone(),
     };
 
+    http_request_with_client(&client, url, method, body, headers).await
+}
+
+/// 同 [`http_request`]，但出口由**调用方给定的客户端**决定（账号级出口槽用）。
+///
+/// 与 [`http_request`] 的差别只有**用哪个客户端发**：账号级 egress 槽必须复用
+/// 「按槽缓存」的 `reqwest::Client`（连接池 / TLS 会话都在里面），否则每条请求都要
+/// 重新握手。状态码 → `Value` 的映射与 [`http_request`] 逐字相同，避免同一份响应在两条
+/// 路径上被解析成不同形状。
+pub async fn http_request_with_client(
+    client: &reqwest::Client,
+    url: &str,
+    method: &str,
+    body: Option<Value>,
+    headers: Option<&HashMap<String, String>>,
+) -> Value {
+    let method = reqwest_method(method);
     /// 发一次（`RequestBuilder` 被 `send()` 消费，重试必须重建）。
     async fn send_once(
         client: &reqwest::Client,
@@ -1236,10 +1269,9 @@ pub async fn http_request_with_proxy(
         req.send().await
     }
 
-    let sent = send_once(&client, &method, url, body.as_ref(), headers).await;
-    /* ★ 未显式指定出口时使用 `direct_client()`：不读环境代理、不做“代理失败后直连”
-    的隐式重试。显式代理失败也**绝不回落到直连** —— 否则同一账号的请求会在
-    另一个公网出口再出现一次，正好破坏风控隔离。 */
+    let sent = send_once(client, &method, url, body.as_ref(), headers).await;
+    // ★ 出口由调用方给定的客户端决定，这里**不做**任何「失败换出口」的隐式重试：
+    //   同一账号的请求在两个公网出口出现两次，正好破坏风控隔离。
     match sent {
         Ok(resp) => {
             let status = resp.status();
@@ -1322,6 +1354,48 @@ pub async fn http_request_raw(
             }
         }
     };
+    http_request_raw_with_client(&client, url, method, body, headers).await
+}
+
+/// 账号级出口的**唯一接缝**：绑了出口槽就用槽的客户端，没绑就走改造前的直连路径。
+///
+/// 分三种结局，语义各不相同（别合并）：
+/// - 未绑定 / 槽被删 / 槽被禁用 ⇒ 调 [`http_request_raw`]（**与改造前逐字相同**的路径，
+///   连客户端都不换）。这是「没开户的账号完全不受影响」的硬保证。
+/// - 绑定存在且槽可用 ⇒ 用 `egress` 按槽缓存的客户端（见 [`http_request_raw_with_client`]）。
+/// - 绑定存在但解不开（槽表损坏、本机密钥换了）⇒ `Err`，**不回落直连**：
+///   否则这个账号的流量会从另一个公网出口再出现一次，正好破坏隔离。
+///   错误串由 `egress` 保证已打码（只含槽 id，不含凭据）。
+pub async fn http_request_raw_for_account(
+    account: &Value,
+    url: &str,
+    method: &str,
+    body: Option<Value>,
+    headers: Option<&HashMap<String, String>>,
+) -> Result<(u16, HashMap<String, String>, String), String> {
+    let resolution = crate::modules::egress::resolve_account(account);
+    if resolution.slot().is_none() {
+        return Ok(http_request_raw(url, method, body, headers, None, true).await);
+    }
+    let client = crate::modules::egress::client_for(&resolution)?;
+    Ok(http_request_raw_with_client(&client, url, reqwest_method(method), body, headers).await)
+}
+
+/// 与 [`http_request_raw`] 相同，但出口由**调用方给定的客户端**决定。
+///
+/// 存在的理由只有一个：账号级出口槽（`egress`）要复用**按槽缓存**的 `reqwest::Client`，
+/// 而 [`http_request_raw`] 只接受一个代理 URL 字符串 —— 用它就得每条请求重建客户端
+/// （丢连接池、丢 TLS 会话，等于每轮任务都做一次完整握手）。
+///
+/// 纪律与 [`http_request_raw`] 一致：**显式出口失败绝不回落到直连**，否则同一账号的
+/// 请求会在另一个公网出口再出现一次，正好破坏隔离。
+pub async fn http_request_raw_with_client(
+    client: &reqwest::Client,
+    url: &str,
+    method: reqwest::Method,
+    body: Option<Value>,
+    headers: Option<&HashMap<String, String>>,
+) -> (u16, HashMap<String, String>, String) {
     let mut req = client.request(method, url);
     req = req.header("Content-Type", "application/json");
     if let Some(h) = headers {
@@ -1346,6 +1420,11 @@ pub async fn http_request_raw(
         }
         Err(e) => (0, HashMap::new(), e.to_string()),
     }
+}
+
+/// 方法名 → `reqwest::Method`（无法解析时回落 GET，与 [`http_request_raw`] 同款宽容）。
+pub(crate) fn reqwest_method(method: &str) -> reqwest::Method {
+    reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET)
 }
 
 /// 把响应体文本解析为 JSON；非 JSON（HTML / 空体）时包成 `{"raw": <前 500 字符>}`。
@@ -1378,12 +1457,20 @@ pub async fn authed_json_request_for(
     if let Some(err) = crate::modules::account::envelope_token_error(account) {
         return (401, json!({"code": -2, "message": err}));
     }
+    // ★ 账号级出口：绑了槽（且槽启用）就用**按槽缓存**的客户端，否则用直连客户端
+    //   （`direct_client()` = `.no_proxy()`，与 `http_request_raw(..., None, true)` 同义）。
+    //   解析失败**不静默回落直连**：那会让「本该从代理出去」的请求从本机真实出口再出现
+    //   一次，正好破坏隔离。错误串由 `egress` 保证已打码（只含槽 id，不含凭据）。
     let mut headers = crate::modules::account::build_auth_headers(account);
     for (k, v) in extra_headers {
         headers.insert(k.clone(), v.clone());
     }
     let (status, _resp_headers, text) =
-        http_request_raw(url, method, body.clone(), Some(&headers), None, true).await;
+        match http_request_raw_for_account(account, url, method, body.clone(), Some(&headers)).await
+        {
+            Ok(result) => result,
+            Err(error) => return (0, json!({"code": -1, "message": error})),
+        };
     let parsed = parse_json_body(&text);
 
     let has_refresh = !account
@@ -1394,12 +1481,17 @@ pub async fn authed_json_request_for(
     if status == 401 && has_refresh {
         let refreshed =
             crate::modules::refresh::refresh_account_token_for(region, account.clone()).await;
+        // 刷新后的账号重新解析一次出口：刷新分支可能已经把账号写回库（槽绑定随账号记录走），
+        // 重解析的代价是一次小文件读，换来「刷新前后走同一条出口」的确定性。
         let mut headers = crate::modules::account::build_auth_headers(&refreshed);
         for (k, v) in extra_headers {
             headers.insert(k.clone(), v.clone());
         }
         let (status, _resp_headers, text) =
-            http_request_raw(url, method, body, Some(&headers), None, true).await;
+            match http_request_raw_for_account(&refreshed, url, method, body, Some(&headers)).await {
+                Ok(result) => result,
+                Err(error) => return (0, json!({"code": -1, "message": error})),
+            };
         return (status, parse_json_body(&text));
     }
     (status, parsed)

@@ -19,8 +19,8 @@ use crate::modules::account::{
     account_display_name, build_auth_headers, envelope_token_error, load_accounts_for,
 };
 use crate::modules::config::{
-    add_checkin_log, http_request, load_checkin_config, load_checkin_logs, now_ms, RunFlagGuard,
-    CHECKIN_API_PREFIX,
+    add_checkin_log, http_request, http_request_with_client, load_checkin_config, load_checkin_logs,
+    now_ms, RunFlagGuard, CHECKIN_API_PREFIX,
 };
 use crate::modules::refresh::ensure_fresh_token_for;
 use crate::modules::region::{region_spec, Region};
@@ -117,7 +117,18 @@ async fn checkin_request_for(region: Region, path: &str, account: &Value) -> Val
         Ok(permit) => permit,
         Err(error) => return json!({"code": -3, "message": format!("风控准入拦截：{error}")}),
     };
-    let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
+    // 签到是**账号身份请求**，与任务链同一条线路：绑了出口槽就从槽出去，没绑走原直连。
+    // 解析失败**不回落直连**（否则同一账号会从两个公网出口出现，破坏隔离）；
+    // 错误串只含槽 id，不含凭据。
+    let resp = match crate::modules::egress::resolve_account(account).slot() {
+        None => http_request(&url, "POST", Some(json!({})), Some(&headers)).await,
+        Some(_) => match crate::modules::egress::client_for_account(account) {
+            Ok(client) => {
+                http_request_with_client(&client, &url, "POST", Some(json!({})), Some(&headers)).await
+            }
+            Err(error) => return json!({"code": -4, "message": format!("出口槽不可用：{error}")}),
+        },
+    };
     let code = resp.get("code").and_then(Value::as_i64).unwrap_or(-1);
     let reason = resp
         .get("message")

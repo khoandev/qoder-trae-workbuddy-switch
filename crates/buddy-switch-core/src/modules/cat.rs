@@ -148,13 +148,13 @@ async fn claim_cat(io: &dyn CatIo, region: Region, account: &Value) -> CatRespon
         return (status, resp);
     }
     let web_url = format!("{CLAIM_WEB_BASE}{CLAIM_PATH}");
-    let mut extra = HashMap::new();
-    extra.insert("Origin".to_string(), CLAIM_WEB_BASE.to_string());
-    extra.insert(
-        "Referer".to_string(),
-        format!("{CLAIM_WEB_BASE}/profile/growth-center"),
-    );
-    extra.insert("x-client-platform".to_string(), "web".to_string());
+    // 与活动门户同一张表（`outbound_headers::campaign_portal`）。头名大小写对
+    // `reqwest` / `HeaderName` 无意义（比较与发送都按小写归一），故统一用小写形态。
+    let extra = crate::modules::outbound_headers::campaign_portal(
+        CLAIM_WEB_BASE,
+        crate::modules::outbound_headers::GROWTH_CENTER_PATH,
+    )
+    .to_map();
     io.request(region, &web_url, "POST", None, account, &extra)
         .await
 }
@@ -498,18 +498,21 @@ mod tests {
         let (_, method, body, extra) = &calls[2];
         assert_eq!(method, "POST");
         assert!(body.is_none());
+        // 头名统一用小写形态（`outbound_headers::campaign_portal`）；`HashMap` 按字节比较，
+        // 真正上线时 `reqwest` 的 `HeaderName` 会归一大小写，线上字节不变。
         assert_eq!(
-            extra.get("Origin").map(String::as_str),
+            extra.get("origin").map(String::as_str),
             Some("https://www.workbuddy.cn")
         );
         assert_eq!(
-            extra.get("Referer").map(String::as_str),
+            extra.get("referer").map(String::as_str),
             Some("https://www.workbuddy.cn/profile/growth-center")
         );
         assert_eq!(
             extra.get("x-client-platform").map(String::as_str),
             Some("web")
         );
+        assert_eq!(extra.len(), 3, "领奖 web 域只应带这三个附加头：{extra:?}");
         assert_eq!(out["accounts"][0]["result"], "claimed", "{out}");
     }
 
