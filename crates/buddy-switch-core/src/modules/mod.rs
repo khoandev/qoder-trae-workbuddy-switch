@@ -105,12 +105,21 @@ pub(crate) mod jsonl_tail;
 // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入 —— 目录即 SSOT。
 pub mod skill;
 pub mod switch;
+// WorkBuddy 任务目录：**唯一一份**任务元数据（kind / target / reward / 不可伪造 / 桌面专属 /
+// 夜猫子 / 专家对 + 活动表 + id 池）。服务端字段优先、目录兜底，未知码明确跳过。
+pub mod task_catalog;
+// WorkBuddy 任务事件构造器：**每个 kind 一份事件体**，`(eventCode, id)` 每次尝试互不相同。
+// 纯函数（`now_ms` / `attempt` 由调用方给），信封只有桌面与小程序两份。见同 spec §3.5。
+pub mod task_event;
 // WorkBuddy 任务链的**唯一出网点**（`TaskIo` trait + 真实实现 + 测试替身）：
 // 准入 → 请求 → 结果回写，三步顺序不可颠倒。见 `docs/specs/WB-AUTOMATION-ARCH.md` §3.
 pub mod task_io;
 // WorkBuddy 任务链的**每日台账**（`{product}/{region}/{account}/{feature}/{date}`）：
 // 当日幂等、失败预算、`needs_human` 中性状态。损坏即 fail-closed，别当空台账跑。
 pub mod task_ledger;
+// TLS 指纹对账：golden ClientHello（抄自 `wb2api@22b7966` 的 uTLS 桥）+ loopback 实测，
+// 差异表的结论写在 `docs/specs/WB-AUTOMATION-ARCH.md` §7.5；不挂 uTLS 侧车（需单独批准）。
+pub mod tls_parity;
 // 每日 Token 记录（账号 × 来源 × 本地日）—— 持久化「今日 Token」，供 UI 展示。
 pub mod token_daily;
 pub mod token_stats;

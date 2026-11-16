@@ -21,8 +21,9 @@
    **不保证**账号不被限制、不被封、不被判定关联；封禁判定由平台做出，本应用不推断原因。
 2. **不伪造必须真人完成的任务**。桌面专属、需真实捐款、需关注公众号满 24 小时这类任务
    **一律标 `needs_human` 并给出深链**，不上报伪造事件（见 §6）。
-3. **默认全关**。任务自动完成、设备身份派生、账号出口、地区面板、TLS 指纹桥
-   **默认都是关的**，开启粒度是**单个账号**，并且必须能**立即关掉**（下一轮不再排程，见 §5）。
+3. **默认全关**。任务自动完成、设备身份派生、账号出口、地区面板这四类开关
+   **默认都是关的**，开启粒度是**单个账号**，并且必须能**立即关掉**（下一轮不再排程，见 §5）；
+   TLS 指纹本轮**不实现**，差额已实测并记入 §7.5（选择 narrowing，理由见该节）。
 
 ## 2. 与 `wb2api@22b7966` 的对账
 
@@ -32,9 +33,10 @@
 
 | # | 能力 | wb2api 参考 | 本仓现状 | 本期落点 |
 |:--|:--|:--|:--|:--|
-| 1 | 任务清单 | `GET /v2/activity/growth/tasks`（桌面头）；`TASK_SPECS` 24 条（`wb_tasks.py:137`）+ 清单带 `ex_*` 时动态解析专家（`wb_tasks.py:481`） | `cat.rs:29` 只取同一端点筛 `black_cat` | 通用引擎，`feature=growth_tasks` |
+| 1 | 任务清单 | `GET /v2/activity/growth/tasks`（桌面头）；`TASK_SPECS` 27 条（`wb_tasks.py:137`；本仓 2026-11-16 实测该 dict 有 27 个键，早前文档写的 24 是错的）+ 清单带 `ex_*` 时动态解析专家（`wb_tasks.py:481`） | `cat.rs:29` 只取同一端点筛 `black_cat` | 通用引擎，`feature=growth_tasks`；元数据在 `task_catalog.rs`（§3.4） |
 | 2 | 批量接取 | `POST /v2/activity/growth/tasks/accept`，体 `{"task_codes":[…]}`，每批 20；逐批记录 `accepted` / `already_accepted` / `failed`，失败**不吞**（`wb_tasks.py:359`） | 只接 `black_cat` | 通用；失败逐条可见 |
-| 3 | 事件上报 | `POST /v2/report`；上游按 `(eventCode, id)` 去重 ⇒ 专家/团队 id 必须互异（`wb_tasks.py:1210`），`EXPERT_ID_POOL` 18 条（`:234`）、`TEAM_ID_POOL` 8 条 | `activity.rs` 的 `/v2/report` 构造器只有对话/心跳类事件 | 按 `kind` 生成事件，复用 `activity.rs` 的构造器 |
+| 3 | 事件上报 | `POST /v2/report`；上游按 `(eventCode, id)` 去重 ⇒ 专家/团队 id 必须互异（`wb_tasks.py:1210`），`EXPERT_ID_POOL` 18 条（`:234`）、`TEAM_ID_POOL` 8 条 | `activity.rs` 的 `/v2/report` 构造器只有对话/心跳类事件 | 收口到 `task_event`（§3.5）：按 `kind` 生成，`(eventCode, id)` 每次尝试互异 |
+***
 | 4 | 复读进度再领奖 | 上报后最多 6 次复读（1.5s / 涨了再 2.5s），未达 `target` 则**顺延到下一轮**（`wb_tasks.py:1241`–`1252`） | `cat.rs` 有同类轮询 | 固化为 verify-before-claim（§4） |
 | 5 | 领奖 | `POST /activity/growth/tasks/{code}/claim`，体 `{}`；`400 task not completed` 不当致命错（`wb_tasks.py:426`） | `black_cat` 有 | 通用 |
 | 6 | 小程序族 | `MP_TASK_SPECS`（`Sequential_Tasks_1..6` + `school_season`，`wb_tasks.py:52`）；头 `X-Client-Product: workbuddy-mp`、`X-Client-Version: 2.4.0`、`X-Client-Platform: mp-weixin`、`X-Platform: wechatmp` + 微信小程序 UA（`:38`–`:51`） | 无（`school.rs` 只做校园日） | 独立 `feature=mp_tasks` |
@@ -53,7 +55,7 @@
 | 14 | 账号出口（代理槽） | `proxy_slots`：`slot-N` + `url` / `enabled` / `ip` / `country` / `asn` / `probed_at`，账号侧持久绑定 `proxySlot`，槽 id **单调分配、不复用**（`wb_settings.py:3440`） | 三平台共享出站客户端 | opt-in `egress_slot`（§7.2） |
 | 15 | 出口退避 | `wb_egress` + `egress_key`（scheme/host/port/proxy 折叠成一把 key），失败计数**按出口**共享而不是按账号（`wb_upstream_pool.py:1720`） | 只有 `risk_control` 的账号级冷却 | opt-in `egress_backoff`（§7.2） |
 | 16 | 地区面板 | `wb_client_geo` + `wb_ipintel`：按出口 IP 生成地区/时区/语言头 | 无 | opt-in `client_geo`（§7.3） |
-| 17 | TLS 指纹 | `WB_TLS_FINGERPRINT=auto/node/python`（默认 auto）+ 独立 Node 桥进程；`python` 表示不起桥（`wb_upstream_pool.py:133`） | rustls 默认栈 | 本期**只保留 python 等价档**；桥不实现（§7.4） |
+| 17 | TLS 指纹 | `WB_TLS_FINGERPRINT=auto/node/python`（默认 auto）+ 独立 Node 桥进程；`python` 表示不起桥（`wb_upstream_pool.py:133`） | rustls 默认栈 | 差额已实测并记入 §7.5；本轮**不挂桥**（narrowing） |
 | 18 | 请求间隔 | 任务链 ≥ 1.0s；活动族按批 3s/4s/10s | `risk_control`（默认关：30 rpm、账号间隔 5s） | 每条 feature 自带间隔，统一走 `admit_platform_request`（§3.2） |
 
 **对账结论**：缺口集中在 §2.1 的 1–8、10 与 §2.2 的 13–16。`activity.rs` / `travel.rs` / `cat.rs`
@@ -81,7 +83,7 @@ task kernel（纯函数）
 
 | 层 | 位置（本期计划） | 只做这些 |
 |:--|:--|:--|
-| 内核 | `crates/buddy-switch-core/src/modules/wb_tasks/`（`plan.rs` / `event.rs` / `spec.rs`） | **纯函数**：从清单 + 台账算出 `Vec<Action>`，不碰网络、不看时钟（`now` 由调用方注入） |
+| 内核 | `crates/buddy-switch-core/src/modules/wb_tasks/`（`plan.rs` / `event.rs`）+ `task_catalog.rs`（任务元数据，§3.4） | **纯函数**：从清单 + 台账算出 `Vec<Action>`，不碰网络、不看时钟（`now` 由调用方注入） |
 | 写出 | `crates/buddy-switch-core/src/modules/task_io.rs`（`TaskIo` / `RealTaskIo` / `FakeTaskIo`） | 每个请求都先 `admit_platform_request(product, region, uid)`，被拦返回 `status=0, code=-3`；响应回写 `record_platform_response`；`RiskPermit` 活到请求结束 |
 | 台账 | `crates/buddy-switch-core/src/modules/task_ledger.rs`（`TaskLedger` / `TaskDayKey` / `TaskGuard`） | 当日幂等、失败预算 3 次、`needs_human` 中性状态、30 天裁剪；文件损坏即 fail-closed |
 | 调度 | `scheduler.rs` + `schedule.rs` | 何时跑、跑哪个账号、失败后退到哪天；**不判断任务语义** |
@@ -124,6 +126,74 @@ task kernel（纯函数）
 - UI 文案只能写「减少过密请求 / 固定出口 / 地区一致性」这类**可验证**的话；
   **不许**出现「防风控」「避免封号」「规避关联」等承诺（§1 第 1 条）。
 
+### 3.4 任务目录（`task_catalog`，唯一一份元数据）
+
+`crates/buddy-switch-core/src/modules/task_catalog.rs` 是任务元数据的**唯一**落点：
+runner 里不许再出现任务码字面量、`target` 数字、专家 id。内容全部转自
+`wb_tasks.py`（`MP_TASK_SPECS:52` / `CAMPAIGN_SPECS:74` / `TASK_SPECS:137` /
+`DESKTOP_ONLY_TASKS:219` / `NIGHT_TASK_CODES:225` / `EXPERT_ID_POOL:234` / `TEAM_ID_POOL:246`）。
+
+| 表 | 条数 | 说明 |
+|:--|:--|:--|
+| `GROWTH_TASKS` | **27** | 每条带 `kind`（16 种判定器）、`target` / `reward`、可选 `expert`、三个旗标 |
+| `MP_TASKS` | **7** | `Sequential_Tasks_1..6` + `school_season`；`kind` 决定小程序事件构造器 |
+| `CAMPAIGNS` | **2** | 星巴克协作、记者节；内含子任务与 `expert` / `skill` / `case_id` 载荷 |
+| `EXPERT_POOL` / `TEAM_POOL` | **18 / 8** | 事件 id 池：上游按 `(eventCode, id)` 去重，重复 id 会让进度永远不动 |
+
+五条判定纪律（都有单测钉住）：
+
+1. **服务端优先**：名称 / `target` / `reward` 的服务端值覆盖目录值（`title or spec.name` 同序），
+   目录只给缺省与语义旗标。
+2. **未知任务码 = 跳过**：目录没有、也推不出专家 id ⇒ `SpecSource::Unknown`，
+   `kind` 为 `None`、`is_actionable()==false`。**不猜 kind**：猜错等于给新任务码上报无效事件。
+3. **旗标带理由**：`desktop_only` / `unforgeable` 是 `Option<&'static str>`（提示文案），
+   不是裸 `bool`——「是不是」与「为什么」不可能各说各话；`night_only` 只有 `black_cat`。
+4. **动态专家优先合法 id**：`jump_url` 的 `deeplink` 内层 `expertId` → 外层 `expertId` →
+   `expert_use_<slug>` 前缀；id 必须匹配 `^ex_[A-Za-z0-9]{6,64}$`，脏 id 不许透传。
+   静态目录先命中，所以 `expert_use_maidehao` 用的仍是 `ex_GDl31WahyIH0`。
+5. **企业号 / 海外区一律跳过**：`gate_for(region, account)` 先看 `enterpriseId`
+   （判据同 `is_enterprise`；JWT 旁路不做），再看 `region != Cn`，两者都返回跳过原因字符串。
+
+验证：`cargo test -p buddy-switch-core --lib modules::task_catalog`（16 条，含目录规模、
+顺序钉死、逐条点检表、未知码、动态专家、脏 id、服务端覆盖、闸门、活动节流、id 池回绕、
+以及「目录里没有凭据」的 include_str! 守卫）。
+
+### 3.5 任务事件（`task_event`，唯一一份事件形状）
+
+`crates/buddy-switch-core/src/modules/task_event.rs` 是事件体的**唯一**落点：runner 只决定
+「发哪个 kind、第几次尝试」，形状与字段名全部从这里出。转自 `wb_tasks.py` 的
+`build_event:640` / `build_desktop_chat_events:508` / `_template_events:1078` /
+`_skill_share_channel_events:976` / `mp_base:549` / `_campaign_chat_event:1566` /
+`_campaign_expert_events:1584` / `_campaign_skill_events:1611` / `_campaign_desktop_events:1637` /
+`CAMPAIGN_CASES:111`。
+
+| 入口 | 覆盖 |
+|:--|:--|
+| `desktop(kind, user, ids)` | canvas / template / expert / team / lighthouse / skill / automation / playbook / skin / chat / glmchat / cat / library，以及 `RichMeow` 的 6 连对话 |
+| `skill_share_chain(ids, share_code)` | 两条 `skill_share_channel_action`；`share_code` 必须来自真实建渠道响应 |
+| `chat_chain(user, ids, model)` | 桌面 6 连成功对话（`agent_task_created` → … → `agent_task_completed`） |
+| `mp(code, ids, expert)` | 小程序单条事件，`kind` 从 `task_catalog::mp_spec` 取；未知码返回 `None` |
+| `campaign_chat` / `campaign_expert` / `campaign_skill` / `campaign_desktop` | 活动四类判据 |
+| `desktop_envelope` / `mp_envelope` / `with_envelope` | 两份信封；事件字段优先于信封字段 |
+| `idempotency_key(event)` | 上游去重键 `(eventCode, id)` |
+
+五条纪律（都有单测钉住）：
+
+1. **纯函数**：不读时钟、不发请求。`now_ms` 与 `attempt` 由调用方给（`EventIds`），
+   事件体因此可在测试里逐字断言。
+2. **id 每次尝试都不同**：`conversationId` / `requestId` / `messageId` 掺 `attempt`；
+   `wbx-canvas-*` 与 `template` 的 `id` 同样掺（参考实现只带毫秒，同毫秒两轮会撞键）。
+3. **池内 id 不越界**：专家 / 团队 id 只能来自 `EXPERT_POOL` / `TEAM_POOL`，按 attempt 轮转；
+   超出池子后重复是上游契约，靠台账「点亮即停」而不是造一个假专家 id。
+4. **信封只有两份**：桌面（`machineId` / `sessionId` / `ideVersion` 由 `device_identity` 与
+   `identity` 传入）与小程序（`mp-<uid 前 16 位>`）。本模块不持有安装盐。
+5. **不装凭证**：事件体与信封里没有 token / cookie / `Authorization` / 密钥字段，
+   `events_never_carry_credential_fields` 逐字段扫描钉住。
+
+验证：`cargo test -p buddy-switch-core --lib modules::task_event`（15 条，含逐 kind 必填字段、
+跨轮 id 唯一、id 池轮转、6 连对话、小程序 kind 映射与未知码、两份信封、活动四类判据、
+活动页面上下文、去重键、凭证扫描）。
+
 ## 4. 台账与 verify-before-claim
 
 **台账路径**：`~/.buddy-switch/wb_automation_ledger.json`（与 `risk_control.json` 同目录，
@@ -161,7 +231,7 @@ task kernel（纯函数）
 | `egress_slot` | **关**（`null`） | 账号 | 走共享出站客户端（`GATEWAY-UPSTREAM-NETWORK.md` 的直连/系统代理规则） |
 | `egress_backoff` | **关** | 账号 | 只保留 `risk_control` 的账号级冷却 |
 | `client_geo` | **关** | 账号 | 不发地区/时区/语言附加头 |
-| TLS 指纹桥 | **不实现** | — | 与今日一致（rustls 默认） |
+| TLS 指纹 | **narrowing**（不挂 uTLS 桥） | — | 与今日一致：rustls 默认栈，差额见 §7.5 |
 | 任务链最小间隔 | **1000ms** | 常量 | 不可关：上游按行为计时 |
 | 活动族间隔 | **3000ms**（慢档 10000ms） | 常量 | 同上 |
 | 台账 `attempts` 上限 | **3**/日 | 常量 | 当日停手，次日重来 |
@@ -287,11 +357,96 @@ task kernel（纯函数）
 - 只在 `client_geo=true` 时附加；与网关侧的 `X-Client-Platform` 等**固定头**互不覆盖。
 - 探测失败 ⇒ **不附加**（fail-closed 到「没有地区头」），不用默认值冒充。
 
-### 7.4 TLS 指纹（不在本期）
+### 7.4 出站头部（`outbound_headers`）
 
-参考实现用独立 Node 桥换 TLS 指纹（`WB_TLS_FINGERPRINT=auto/node/python`）。本仓**本期不实现**：
-引入桥进程等于引入一个外部运行时，收益不可测而风险面明确（§1 第 1 条）。文档记录该差异即可，
-若未来要做，必须先有独立的决策条目，不在本文件里预留开关。
+- **五种形态各一张表**（`crates/buddy-switch-core/src/modules/outbound_headers.rs`）：
+  `desktop`（浏览器形态 JSON）、`cli`（上游刷新 / 目录）、`mp`（微信小程序）、
+  `campaign_portal`（活动 web 门户）、`chat`（对话 SSE）。表是**有序**的
+  `Vec<(name, value)>`，模块外只能拿 `to_map()`，不许再各自拼字面量。
+- **UA / 版本只有一处**：桌面形态用 `config::DEFAULT_HTTP_USER_AGENT`（官网套餐页捕获的
+  那条 Chrome UA），CLI 形态用 `outbound_headers::CLI_USER_AGENT`，chat 形态由
+  `identity::chat_user_agent(region, version, cli)` 构造。唯一允许写死的是
+  `MP_USER_AGENT`——官方小程序 UA 里没有版本 token，也没有可解析来源。
+  测试用 `include_str!` 扫 `school.rs` / `activity.rs` / `cat.rs` / `upstream.rs`，
+  出现 UA 字面量即红。
+- **顺序是构造契约，不是线上字节序证据**：`reqwest` / `http::HeaderMap` 内部是哈希表，
+  实际发出的字节顺序不受本表控制。快照（`HeaderSet::wire_snapshot`，`name: value` 每行一条）
+  防的是**头名与取值的漂移**；要做到逐字节线序必须换自建传输层，本期不做。
+- **不猜改线上行为**：本次只收敛已在用的头，取值逐字不变——`school_extra` → `mp`，
+  `growth_extra` 与猫猫领奖的 web 降级 → `campaign_portal`，`upstream::common_headers` → `cli`。
+  领奖那张表的头名从 `Origin`/`Referer` 改成小写，是 `HashMap` 键的字节差异，
+  上线时 `HeaderName` 仍归一为同一个头名，线上字节不变。
+- **漂移守卫**：`chat` 表与真正在发的 `account::build_chat_headers` 逐条比对（UA 除外），
+  两边任一改动都会红；chat 缺版本直接报错，不拿空版本拼 UA。
+- **参考基线**：`wb2api@22b7966` 的 `docs/OUTBOUND-HEADER-AUDIT.md`。该审计自己声明
+  「参考表只是线索，不是验过的官方夹具」，所以本仓**不照抄**它的 43 个头与
+  `x-stainless-*` / `baggage` / `X-B3-*`；只在本仓已有观测的范围内收敛。
+
+### 7.5 TLS 指纹（本轮：量过、记账、选择 narrowing）
+
+参考实现用一个独立桥进程换 TLS 指纹（`WB_TLS_FINGERPRINT=auto/node/python`），
+`node` 档的 ClientHello 抄自 `tools/wb-tls-bridge/main.go` 的 `officialCipherSuites` +
+`officialHelloSpec`：**18 套件 / 10 扩展 / 无 ALPN / X25519+P-256+P-384 / 9 个签名算法 /
+TLS1.3→TLS1.2 / 无 GREASE**（`README.md` 的口径是「18 ciphers, 10 extensions, no ALPN」）。
+
+本仓**不再假设自己与它一致，而是量出来**：
+
+- 数据与判定：`crates/buddy-switch-core/src/modules/tls_parity.rs`
+  （`GOLDEN_*` 常量 = 抄来的 golden，`MEASURED_*` 常量 = 实测，`compare()` = 差异表，
+  `DELTA_FIELDS` = 允许出现的差异清单）。
+- 探针：`crates/buddy-switch-core/examples/tls_probe.rs`
+  （`cargo run -p buddy-switch-core --example tls_probe` → 打 local-vs-golden 整张表）。
+- 抓法：在 loopback 起一个只读监听器，让 `reqwest` 去连它，抓握手首包再按 TLS 结构解析。
+  **不发业务请求、不连外网**，所以离线 CI 也能跑。
+
+**实测（2026-11-16，`reqwest 0.12.28` + `rustls 0.23.43` + `ring`）**：
+
+| 字段 | golden（uTLS 桥） | 本仓实测 | 能否用 rustls/reqwest 表达 | 处置 |
+|:--|:--|:--|:--|:--|
+| 密套件 | 18 条，TLS1.3 三条在前，含 7 条 CBC + 2 条 RSA-kx | 10 条 AEAD + `SCSV(0x00ff)`，顺序 `1302,1301,1303,c02c,c02b,cca9,c030,c02f,cca8` | **不能**：rustls 只实现 AEAD（无 CBC、无 RSA-kx），reqwest 不暴露顺序 | 接受差额 |
+| 扩展 | 10 个，顺序 `0000,0017,ff01,000a,000b,0023,000d,0033,002d,002b` | 11 个，集合 `0000,0005,000a,000b,000d,0010,0017,0023,002b,002d,0033`；**顺序每个连接随机** | **不能**：顺序是 rustls 0.23 的抗指纹特性（每次握手重排，实测四次四种顺序）；`renegotiation_info(0xff01)` 根本不发，且多发 `status_request(0x0005)` 与 `ALPN(0x0010)` | 接受差额 |
+| 签名算法 | 9 条，含 `rsa_pkcs1_sha1(0x0201)` | 9 条，多 `rsa_pss_pss_sha256(0x0807)`、少 `0x0201`，顺序不同 | **不能**：reqwest 不暴露该列表 | 接受差额 |
+| ALPN | **无** | `["http/1.1"]`（本仓未启用 `http2` 特性） | 只能靠 `use_preconfigured_tls` 清空，而那需要**直接依赖 `rustls`**（新依赖） | 接受差额 |
+| 支持组 | `X25519,P-256,P-384` | **一致** | — | 已对齐 |
+| key_share | 首包只带 `X25519` | **一致** | — | 已对齐 |
+| 版本 | `TLS1.3,TLS1.2` | **一致** | — | 已对齐 |
+| SNI / 压缩 / GREASE | 有 SNI / 只有 `null` / 无 GREASE | **一致**（无 GREASE） | — | 已对齐 |
+
+> 两个反直觉的实测结果，值得单独记：
+>
+> 1. rustls **会**发 `ec_point_formats(0x000b)` ——「rustls 从不发这个扩展」的常见印象是错的；
+> 2. rustls 0.23 **每个连接都重新打乱扩展顺序**（抗指纹特性）。也就是说本仓连「自己两次握手
+>    的扩展顺序一致」都做不到，逐字对齐 golden 的顺序在架构上就不可能——这不是缺配置。
+>
+> 这正是本节要求「量，而不是读源码猜」的理由：两条结论都只能抓包得到。
+
+**本轮决策：narrowing（明确不追求逐字节对齐），不挂 uTLS 侧车。** 理由按重要性排：
+
+1. **表达不出来，不是没配置**：golden 里 7 条 CBC、2 条 RSA-kx 套件在 rustls 里**不存在实现**；
+   扩展顺序与签名算法列表也没有配置入口。要在本仓复现 golden，唯一可行路径是
+   **自建 TLS 栈或引入 uTLS**（Go/Node 外部运行时），不是「调一个参数」。
+2. **收益不可测**：§1 第 1 条已经写明不承诺规避封禁。当前没有任何证据表明平台的限流
+   按 JA3/JA4 聚类；为一条未经验证的假设引入外部运行时（多一个进程、多一套供应链、
+   多一处凭据面）不划算。相关的判断依据只能来自 §9 的两账号 spike。
+3. **已对齐的部分是真的对齐**：支持组、key_share、版本、SNI、无 GREASE 五条实测一致——
+   也就是说「最像机器人的那几条」没有偏差，差额集中在老套件与扩展顺序上。
+
+**不做的后果，写在明面上**：如果平台真的按 TLS 指纹聚类，本仓请求仍与官方客户端不同；
+本节不假装已对齐，也不把「差异表已记录」说成「风险已消除」。真要做时的触发条件与代价：
+
+- 触发：§9 的两账号 spike 出现**只能用 TLS 指纹解释**的限流/差异（同期头部、出口、间隔都排除了）。
+- 代价：`use_preconfigured_tls` + 直接依赖 `rustls` 只能解决 ALPN 与套件顺序的一部分；
+  完整 golden 需要 uTLS/自建 ClientHello，即**引入新依赖或外部运行时 ⇒ 先单独批准**（§10 末条）。
+  批准后的落点是新增一个「TLS 档」开关（与 `device_identity` / `egress_slot` 同级、默认关），
+  而不是替换默认栈。
+
+**漂移守卫**（依赖升级时不靠人记）：
+
+- `cargo test -p buddy-switch-core --lib modules::tls_parity` —— 抓包结果必须与
+  `MEASURED_*` 一致；差异字段必须正好是 `DELTA_FIELDS` 那四条；扩展顺序必须仍然随机
+  （`extension_order_is_randomized_per_connection`：6 次抓包至少两种顺序）；
+- `decision_is_recorded_in_the_spec` 用 `include_str!` 把本节读进编译产物：
+  代码改结论而本节没改（或本节被删）就会红。
 
 ## 8. 秘密与日志
 
