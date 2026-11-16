@@ -87,27 +87,32 @@ BUDDY_SWITCH_TAG=edge docker compose pull && docker compose up -d
 
 ### 镜像可见性
 
-⚠️ **个人账号下首次发布的包默认是 Private**（GitHub 文档原话：*"When you first publish a
-package that is scoped to your personal account, the default visibility is private"*）。
-Private 包匿名拉不到，而 `docker compose up -d` 拉不到时会**静默回落到本地构建** ——
-症状是「卡了好几分钟才开始编译」，不是报错。
-
-所以**第一次推送成功后要做一次**：到
-`https://github.com/users/khoandev/packages/container/buddy-switch/settings`
-→ Danger Zone → Change visibility → **Public**（改成 Public 不可逆）。
-
-验证匿名可拉（不带任何凭据）：
+当前状态：**Public**。2026-11-16 首次发布后实测（匿名、不带任何凭据）：
 
 ```bash
-docker logout ghcr.io    # 确保不是靠本地登录态在兜底
-docker pull ghcr.io/khoandev/buddy-switch:latest
+# 1) 匿名 token（Private 包这一步会 401 / DENIED）
+TOKEN=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:khoandev/buddy-switch:pull" \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+# 2) manifest：200 且 mediaType 是 oci.image.index（多架构）；tags/list 能看到 edge
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+  -H 'Accept: application/vnd.oci.image.index.v1+json' \
+  https://ghcr.io/v2/khoandev/buddy-switch/manifests/edge
+curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/khoandev/buddy-switch/tags/list
 ```
 
-若仍报 `denied` / `unauthorized`，查两处：包设置里 Visibility 是否真的是 Public；
-以及该 tag 是否**真的发过**（`edge` 只在手动触发时产出，`latest` 只在推 `v*` tag 时产出）。
+⚠️ **不要**用 `curl https://ghcr.io/v2/<owner>/<pkg>/manifests/<tag>` 判断可见性：registry
+无论包是 Public 还是 Private，都会先回 **401**（缺 bearer token），看起来像「拉不到」，
+其实只是没走 token 流程。判据只有上面第 1 步能不能换到 token。
 
-> 对照上游：`ghcr.io/nextagentx/buddy-switch` 已于 2026-10-19 实测为 Public；本仓的
-> `khoandev` 包是**新建的**，不继承那个状态。
+若某次之后真的换不到 token（包被改成 Private，或新账号下新建的同名包）：到
+`https://github.com/users/khoandev/packages/container/buddy-switch/settings`
+→ Danger Zone → Change visibility → **Public**（改成 Public **不可逆**）。Private 包匿名
+拉不到，而 `docker compose up -d` 拉不到时会**静默回落到本地构建** —— 症状是「卡了好几分钟
+才开始编译」，不是报错。私有包也能用，只是每台机器都要先
+`echo $CR_PAT | docker login ghcr.io -u khoandev --password-stdin`（PAT 需 `read:packages`）。
+
+`latest` 目前**不存在**（还没有 `v*` tag 发布过），只有 `edge`；此时 `docker pull ...:latest`
+报 `manifest unknown` 属正常，不是权限问题。
 
 ---
 
