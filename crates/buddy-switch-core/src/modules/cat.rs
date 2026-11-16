@@ -14,10 +14,11 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::modules::account::{account_display_name, load_accounts_for};
-use crate::modules::config::{authed_json_request_for, load_checkin_config, now_ms};
+use crate::modules::config::{load_checkin_config, now_ms};
 use crate::modules::cst::in_night_window;
 use crate::modules::refresh::ensure_fresh_token_for;
 use crate::modules::region::{region_spec, Region};
+use crate::modules::task_io::{self, WORKBUDDY_PRODUCT};
 
 /// `black_cat` 的达成目标次数。
 pub const CAT_TARGET: i64 = 3;
@@ -77,9 +78,8 @@ pub type CatResponse = (u16, Value);
 
 /// 夜猫子域 HTTP 取值点（依赖注入缝）。
 ///
-/// 生产实现 [`RealCatIo`] 走真实网络（逐字沿用既有三处请求构造：同一 URL 拼接 / 同一
-/// `authed_json_request_for` / 同样的 header / 同样的 body）；单测注入桩实现，
-/// **绝不发起真实请求**，从而可驱动真实入口 [`run_cat_cycle_for_with`]。
+/// 生产实现 [`RealCatIo`] 走真实网络，但**只能经 `task_io::send`**（准入 → 请求 → 结果回写）；
+/// 单测注入桩实现，**绝不发起真实请求**，从而可驱动真实入口 [`run_cat_cycle_for_with`]。
 ///
 /// `Send + Sync` 超级约束：调度器在 `tokio::spawn` 里调用，要求 `&dyn CatIo` 可跨线程
 /// （与 `school::SchoolIo` 完全一致）。
@@ -98,7 +98,7 @@ pub trait CatIo: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = CatResponse> + Send + 'a>>;
 }
 
-/// 生产用取值点：真实 HTTP（逐字转发既有 `authed_json_request_for` 调用）。
+/// 生产用取值点：真实 HTTP，统一走 `task_io::send`（准入 → 请求 → 结果回写）。
 pub struct RealCatIo;
 
 impl CatIo for RealCatIo {
@@ -111,9 +111,9 @@ impl CatIo for RealCatIo {
         account: &'a Value,
         extra: &'a HashMap<String, String>,
     ) -> Pin<Box<dyn Future<Output = CatResponse> + Send + 'a>> {
-        Box::pin(
-            async move { authed_json_request_for(region, url, method, body, account, extra).await },
-        )
+        Box::pin(async move {
+            task_io::send(WORKBUDDY_PRODUCT, region, url, method, body, account, extra).await
+        })
     }
 }
 

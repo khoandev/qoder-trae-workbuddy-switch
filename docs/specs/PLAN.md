@@ -1834,8 +1834,9 @@ sk-uni-…          /health /status /v1/models
 
 ## 7. 决策（本节 34 条）—— **✅ 全部已确认（2026-10-03）**
 
-> ⚠️ **本节只覆盖 D1–D34。`DECISIONS.md` 的现行编号已到 D46**：
-> D35–D42 来自 2026-10-10 的对齐轮（Q1–Q7），D43–D46 来自 P15（外部 Agent 会话监听）。
+> ⚠️ **本节只覆盖 D1–D34。`DECISIONS.md` 的现行编号已到 D60**：
+> D35–D42 来自 2026-10-10 的对齐轮（Q1–Q7），D43–D46 来自 P15（外部 Agent 会话监听），
+> D58–D60 来自 2026-11-16 的 WorkBuddy CN 自动化（见 [`WB-AUTOMATION-ARCH.md`](WB-AUTOMATION-ARCH.md)）。
 > **统一入口（P16）的 8 条决策目前只在 `UNIFIED-GATEWAY-ARCH.md` §10，尚未并入 `DECISIONS.md` 编号。**
 > 读决策时以 `DECISIONS.md` 为准。
 

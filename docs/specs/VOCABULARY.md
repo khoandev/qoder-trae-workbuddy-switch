@@ -70,12 +70,26 @@
 | 校验位置 | **后端命令分发层** | 纯前端 |
 
 **能力枚举**（`registry.ts` 的 `Capability`）：
-`checkin` · `travel` · `credits` · `oauth` · `gateway` · `autoRotate` · `sessionCopy`
+`checkin` · `travel` · `credits` · `oauth` · `gateway` · `autoRotate` · `sessionCopy` · `tasks`
+
+⚠️ **`tasks` 只有 WorkBuddy CN 有**（2026-11-16 增补，D59）：指「由本应用代做的成长任务链」
+（读清单 → 接取 → 上报事件 → 复读进度 → 领奖），**不是**「这个平台有没有任务中心」——
+任务中心三平台都有，能不能由本应用代做才是能力。带 `unforgeable` / 桌面专属的任务**不属于**它
+（它们的结果是 `needs_human`，见 [`WB-AUTOMATION-ARCH.md`](WB-AUTOMATION-ARCH.md) §6）。
+
+⚠️ **文档先行**：本词条的代码落点（`capability.rs` / `registry.ts` 的第 8 项与
+「每账号 automation 开关」）在 `WB-AUTOMATION-ARCH.md` 的分期里落地；落地前代码仍为 7 项，
+`check:scope` 的对照断言在落地那一步一起改。**别只改文档就宣称功能存在。**
 
 ⚠️ `sessionCopy` **只有 WorkBuddy 有**，且精确到 **WorkBuddy 桌面**（CodeBuddy IDE / CLI 都没有）——
 见 PLAN §3.15 的能力边界。
 
 **反例（P15 之后新增，别搞混）**：「客户端会话监听」**不是**能力，而是**偏好驱动的动作**。
+
+**另一个反例（2026-11-16）**：「设备身份派生 / 账号出口 / 地区面板」**不是**能力，也是**偏好**：
+它们与平台无关，问的是「用户同不同意让本软件改变这台设备/这条出口的样子」，载体是账号记录的
+`automation` 字段（默认全关），关掉即回官方原值与共享出站客户端。判据同上表：「关掉会怎样」与
+偏好那一列的性质吻合，而「改错了会怎样」不可能是「代码错」。
 
 | 为什么不进 `Capability` | 说明 |
 |:---|:---|

@@ -24,9 +24,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crate::modules::account::{account_display_name, load_accounts_for};
-use crate::modules::config::{authed_json_request_for, load_checkin_config, now_ms};
+use crate::modules::config::{load_checkin_config, now_ms};
 use crate::modules::refresh::ensure_fresh_token_for;
 use crate::modules::region::{region_spec, Region};
+use crate::modules::task_io::{self, WORKBUDDY_PRODUCT};
 
 /// 开学季活动唯一标识（事件体 `activityId` 字段值）。
 pub const SCHOOL_ACTIVITY_ID: &str = "school_open_day_2026";
@@ -127,13 +128,14 @@ fn school_extra(region: Region) -> HashMap<String, String> {
 /// 单次请求的返回值：`(HTTP 状态码, 响应体)`。
 ///
 /// 保留原始状态码是关键——「活动下线(200 + code≠0)」「转盘余额为 0(409)」等**正常态**
-/// 判定依赖它；普通 `http_request` 会把状态码折进 `code`，无法区分。
+/// 判定依赖它；普通 JSON 助手会把状态码折进 `code`，无法区分。
 pub type SchoolResponse = (u16, Value);
 
 /// 开学季域 HTTP 取值点（依赖注入缝）。
 ///
-/// 生产实现 [`RealSchoolIo`] 走真实网络；单测注入桩实现，**绝不发起真实请求**。
-/// 这使得单测可以驱动真实入口 [`run_school_cycle_for_with`]，而不是只测孤立纯函数。
+/// 生产实现 [`RealSchoolIo`] 走真实网络，但**只能经 `task_io::send`**（准入 → 请求 → 结果回写）；
+/// 单测注入桩实现，**绝不发起真实请求**。这使得单测可以驱动真实入口
+/// [`run_school_cycle_for_with`]，而不是只测孤立纯函数。
 ///
 /// `Send + Sync` 超级约束：调度器在 `tokio::spawn` 里调用，要求 `&dyn SchoolIo` 可跨线程。
 pub trait SchoolIo: Send + Sync {
@@ -148,7 +150,7 @@ pub trait SchoolIo: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = SchoolResponse> + Send + 'a>>;
 }
 
-/// 生产用取值点：真实 HTTP（附加小程序 UA / Origin / Referer）。
+/// 生产用取值点：真实 HTTP（附加小程序 UA / Origin / Referer），统一走 `task_io::send`。
 pub struct RealSchoolIo;
 
 impl SchoolIo for RealSchoolIo {
@@ -162,8 +164,8 @@ impl SchoolIo for RealSchoolIo {
     ) -> Pin<Box<dyn Future<Output = SchoolResponse> + Send + 'a>> {
         Box::pin(async move {
             let url = format!("{}{path}", region_spec(region).billing_base);
-            authed_json_request_for(region, &url, method, body, account, &school_extra(region))
-                .await
+            let extra = school_extra(region);
+            task_io::send(WORKBUDDY_PRODUCT, region, &url, method, body, account, &extra).await
         })
     }
 }

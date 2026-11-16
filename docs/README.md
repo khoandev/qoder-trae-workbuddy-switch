@@ -30,6 +30,7 @@
 | 改网关（路由 / 换号 / 错误信封 / 命名空间） | [`specs/UNIFIED-GATEWAY-ARCH.md`](specs/UNIFIED-GATEWAY-ARCH.md) + [`specs/P11-ARCH.md`](specs/P11-ARCH.md) + [`specs/P12-ARCH.md`](specs/P12-ARCH.md) |
 | 账号在回复中途挂掉 / 想「静默换号」（issue #129） | [`specs/ACCOUNT-FAILOVER.md`](specs/ACCOUNT-FAILOVER.md)（对外错误形状契约 + 关闭态不变量 + 五条治理链路） |
 | 网关「必须开着代理才能用」/ 上游 TLS 被掐断 / 要不要走 `HTTPS_PROXY` | [`specs/GATEWAY-UPSTREAM-NETWORK.md`](specs/GATEWAY-UPSTREAM-NETWORK.md) |
+| 想让账号自己把 WorkBuddy 成长任务做完（成长 / 小程序 / 运营活动 / Buddy 盲盒）/ 设备身份·账号出口·地区面板要不要开 | [`specs/WB-AUTOMATION-ARCH.md`](specs/WB-AUTOMATION-ARCH.md)（对账 `wb2api@22b7966`，**默认全关**，D58–D60） |
 | 想按模型设默认思考档（`reasoning_effort`） | [`specs/GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) |
 | 改前端某个页面 | [`specs/PLAN.md`](specs/PLAN.md) 对应 §3.x + 该期 `P*-ARCH.md` |
 | 给密钥设 token 配额 / 限制可访问账号（issue #76） | [`specs/KEY-PERMISSION-UI-DESIGN.md`](specs/KEY-PERMISSION-UI-DESIGN.md)（**已实现**：四条产品线的台账 / 命令 / 前端表 / 中继全部接通）+ [`prototype/key-permission-design.html`](prototype/key-permission-design.html)（可点设计稿） |
@@ -39,7 +40,7 @@
 | 用量页要显示缓存命中率（三平台 / 客户端 + 网关） | [`specs/CACHE-HIT-RATE-PLAN.md`](specs/CACHE-HIT-RATE-PLAN.md)（口径、探针、迁移与 UI） |
 | 新增一个平台 / 产品线 | [`specs/P5-ARCH.md`](specs/P5-ARCH.md) + [`specs/UNIFIED-GATEWAY-ARCH.md`](specs/UNIFIED-GATEWAY-ARCH.md) §11 |
 | 用词拿不准（region / scope / 作用域…） | [`specs/VOCABULARY.md`](specs/VOCABULARY.md)（**冻结，不许自创**） |
-| 想知道某功能当初为什么这么做 | [`specs/DECISIONS.md`](specs/DECISIONS.md)（D1–D46） |
+| 想知道某功能当初为什么这么做 | [`specs/DECISIONS.md`](specs/DECISIONS.md)（D1–D60） |
 | 加新交互（先原型、后代码） | [`prototype/`](prototype/) → `index.html` 可直接打开 |
 | 账号页「客户端限流」怎么和网关「限流探测」联动（同一份数据 + 两处入口） | [`prototype/limit-link-proto.html`](prototype/limit-link-proto.html)（可点设计稿，**已落地**）+ [`prototype/verify-limit-link.mjs`](prototype/verify-limit-link.mjs)（34 条行为校验）+ [`specs/MODEL-LIMIT-PROBE-PLAN.md`](specs/MODEL-LIMIT-PROBE-PLAN.md) §5.9（口径） |
 | 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.161428`](releases/v2026.11.161428.md)） |
@@ -55,14 +56,15 @@
 | 文档 | 内容 | 状态 |
 |:--|:--|:--|
 | [`PLAN.md`](specs/PLAN.md) | 架构与交互重构总方案 v2.8（P0–P16 分期表、交互规范、Playbook） | 现行 · P0–P16 已落地 |
-| [`DECISIONS.md`](specs/DECISIONS.md) | 决策清单 D1–D46，逐条有结论 | 现行 · 已拍板 |
+| [`DECISIONS.md`](specs/DECISIONS.md) | 决策清单 D1–D60，逐条有结论 | 现行 · 已拍板 |
 | [`VOCABULARY.md`](specs/VOCABULARY.md) | 词汇表（P0 冻结）。**新代码只许用「新词汇」** | 现行 · 冻结 |
 | [`COVERAGE-REPORT.md`](specs/COVERAGE-REPORT.md) | 原型 112 条行为 vs 真实应用的覆盖度实测 | 现行 · 随原型更新 |
 | [`P5-P12-TASKS.md`](specs/P5-P12-TASKS.md) | P5–P12 的执行级任务清单 | 现行 |
 | [`UPDATE-NOTES-ARCH.md`](specs/UPDATE-NOTES-ARCH.md) | 升级前说明弹窗（版本内容）：四阶段交互、数据契约、发布侧产出与切片口径 | 现行 · 2026-10-17 落地 |
 | [`GATEWAY-UPSTREAM-NETWORK.md`](specs/GATEWAY-UPSTREAM-NETWORK.md) | 网关**出站**网络：默认直连 vs 系统代理（`no_proxy` 纪律 + 兜底回落 + 排查手法） | 现行 · 2026-11-08 落地 |
 | [`RISK-ACCOUNT-ISOLATION.md`](specs/RISK-ACCOUNT-ISOLATION.md) | 本地认证快照、共享出站客户端与风控状态的适用边界 | 现行 · 2026-11-13 |
-| [`RISK-CONTROLS-DESIGN.md`](specs/RISK-CONTROLS-DESIGN.md) | WorkBuddy / Trae / Qoder 网关合规风控设置设计（方案 A） | 现行 · 2026-11-13 落地 |
+| [`RISK-CONTROLS-DESIGN.md`](specs/RISK-CONTROLS-DESIGN.md) | WorkBuddy / Trae / Qoder 网关合规风控设置设计（方案 A） | 现行 · 2026-11-13 落地，2026-11-16 修订非目标（D58） |
+| [`WB-AUTOMATION-ARCH.md`](specs/WB-AUTOMATION-ARCH.md) | WorkBuddy CN 任务完成引擎 + 反滥用前置：与 `wb2api@22b7966` 的逐项对账、`TaskIo` / 台账 / verify-before-claim、opt-in 默认值与 `needs_human` 策略 | 现行 · 2026-11-16 |
 | [`2026-11-13-three-platform-risk-controls.md`](superpowers/plans/2026-11-13-three-platform-risk-controls.md) | 三平台合规风控设置实施计划 | 已完成 · 2026-11-13 |
 | [`2026-11-14-agent-session-isolation.md`](superpowers/plans/2026-11-14-agent-session-isolation.md) | 多 Agent Responses 会话身份隔离、续接状态保活与历史裁剪诊断实施计划 | 已完成 · 2026-11-14 |
 | [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |

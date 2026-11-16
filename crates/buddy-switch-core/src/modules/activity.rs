@@ -16,10 +16,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::modules::account::{account_display_name, load_accounts_for};
-use crate::modules::config::{authed_json_request_for, load_checkin_config, now_ms};
+use crate::modules::config::{load_checkin_config, now_ms};
 use crate::modules::cst::{cst_date_str, cst_yesterday_str};
 use crate::modules::refresh::ensure_fresh_token_for;
 use crate::modules::region::{region_spec, Region};
+use crate::modules::task_io::{self, WORKBUDDY_PRODUCT};
 use crate::modules::schedule::load_schedule_config;
 
 /// 账号之间的间隔（限速，避免批量请求触发风控）。
@@ -164,23 +165,35 @@ fn growth_extra(region: Region) -> HashMap<String, String> {
 
 async fn billing_post(region: Region, path: &str, body: Value, account: &Value) -> (u16, Value) {
     let url = format!("{}{path}", region_spec(region).billing_base);
-    authed_json_request_for(region, &url, "POST", Some(body), account, &HashMap::new()).await
-}
-
-async fn chat_get(region: Region, path: &str, account: &Value) -> (u16, Value) {
-    let url = format!("{}{path}", region_spec(region).chat_base);
-    authed_json_request_for(region, &url, "GET", None, account, &growth_extra(region)).await
-}
-
-async fn chat_post(region: Region, path: &str, body: Value, account: &Value) -> (u16, Value) {
-    let url = format!("{}{path}", region_spec(region).chat_base);
-    authed_json_request_for(
+    task_io::send(
+        WORKBUDDY_PRODUCT,
         region,
         &url,
         "POST",
         Some(body),
         account,
-        &growth_extra(region),
+        &HashMap::new(),
+    )
+    .await
+}
+
+async fn chat_get(region: Region, path: &str, account: &Value) -> (u16, Value) {
+    let url = format!("{}{path}", region_spec(region).chat_base);
+    let extra = growth_extra(region);
+    task_io::send(WORKBUDDY_PRODUCT, region, &url, "GET", None, account, &extra).await
+}
+
+async fn chat_post(region: Region, path: &str, body: Value, account: &Value) -> (u16, Value) {
+    let url = format!("{}{path}", region_spec(region).chat_base);
+    let extra = growth_extra(region);
+    task_io::send(
+        WORKBUDDY_PRODUCT,
+        region,
+        &url,
+        "POST",
+        Some(body),
+        account,
+        &extra,
     )
     .await
 }

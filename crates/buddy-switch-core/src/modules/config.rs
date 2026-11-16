@@ -445,6 +445,14 @@ pub fn reward_gate_file() -> PathBuf {
     store_dir().join("reward_gate.json")
 }
 
+/// 设备身份派生的**安装盐**（`device_identity` 开关用，见 `device_identity.rs`）。
+///
+/// 只存本机：**不进备份包、不进导出、不进诊断包**（备份是表驱动分区，这里刻意不加分区）。
+/// 文件由 `atomic_write` 落盘，权限 0600（`write_private_file`）。
+pub fn device_identity_salt_file() -> PathBuf {
+    store_dir().join("device_identity_salt.json")
+}
+
 pub fn credit_usage_snapshots_file() -> PathBuf {
     store_dir().join("credit_usage_snapshots.json")
 }

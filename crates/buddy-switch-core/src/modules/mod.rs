@@ -16,6 +16,11 @@ pub mod at_rest;
 pub mod auth_file;
 pub mod backup;
 pub mod backup_sections;
+// 出口级退避 + 熔断：键是 `slot-N` / `direct`（**不碰账号状态**）。只对 hard 失败计数，
+// 指数退避 1s→15s 带抖动，熔断 30 分钟起翻倍到 6 小时、半开只放一次试探。
+// 与 `risk_control` 的账号级冷却**两层并存**，调用方取更严的那个。
+// 依据：`docs/specs/WB-AUTOMATION-ARCH.md` §7.2。
+pub mod backoff;
 // P5 §2.2 · 后台任务注册表（`TaskKind` + `TaskSpec` + `TASKS`）—— 两宿主共用的唯一事实来源。
 pub mod background;
 // P12 T03 · 业务转发的**路径白名单**（本地路由）—— 放在 core 是因为**两侧都要用**：
@@ -45,6 +50,10 @@ pub mod diagnostics;
 pub mod credit_usage;
 pub mod credits;
 pub mod cst;
+// WorkBuddy 的**按账号派生的设备身份**（opt-in、默认关）：machineId / sessionId / requestId
+// 由 HKDF-SHA256(安装盐, uid, realm) 派生，安装盐 0600 落盘且不进备份/导出。
+// 唯一挂载点是 `task_io::send`；依据 `docs/specs/WB-AUTOMATION-ARCH.md` §7.1。
+pub mod device_identity;
 pub mod error_code;
 pub mod export_import;
 pub mod identity;
@@ -90,6 +99,12 @@ pub(crate) mod jsonl_tail;
 // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入 —— 目录即 SSOT。
 pub mod skill;
 pub mod switch;
+// WorkBuddy 任务链的**唯一出网点**（`TaskIo` trait + 真实实现 + 测试替身）：
+// 准入 → 请求 → 结果回写，三步顺序不可颠倒。见 `docs/specs/WB-AUTOMATION-ARCH.md` §3.
+pub mod task_io;
+// WorkBuddy 任务链的**每日台账**（`{product}/{region}/{account}/{feature}/{date}`）：
+// 当日幂等、失败预算、`needs_human` 中性状态。损坏即 fail-closed，别当空台账跑。
+pub mod task_ledger;
 // 每日 Token 记录（账号 × 来源 × 本地日）—— 持久化「今日 Token」，供 UI 展示。
 pub mod token_daily;
 pub mod token_stats;
