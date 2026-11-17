@@ -520,14 +520,16 @@ Trae/Qoder 走 `gateway_ledger::usage_dim`）：
 ⚠️ **管理面暴露 = 明文暴露（本次新增的风险面）**
 
 `GET /api/{gateway,trae/gateway,qoder/gateway,unified-gateway}/keys` 现在会带上
-`plaintext`。管理面的 `api_guard` 只做 Host / Origin 校验（防 DNS rebinding），**不做身份认证**。
+`plaintext`。管理面的 `api_guard` 只做 Host / Origin 校验（防 DNS rebinding）；设置
+`BUDDY_SWITCH_AUTH_KEY` 后由 `app_auth` 的会话 Cookie 做身份认证（不设则不认证）。
 因此：
 
 - 只绑 `127.0.0.1`（默认）：本机任何进程 `curl` 都能读到全部**已保存**的明文。
   改造前它只能读到掩码 —— 这是本需求带来的实际降级，已在面板里由用户显式选择承担。
 - 一旦按 `LINUX-WEBUI-FALLBACK.md` 改成 `0.0.0.0` + `BUDDY_SWITCH_ALLOWED_HOSTS`，
-  **局域网内任何设备都能直接拉走明文**。开启前必须确认网络可信；不信任的网络里应保持
-  回环绑定，或让用户对所有 Key 选「自行保存」（这样列表里没有明文可漏）。
+  **若未设置 `BUDDY_SWITCH_AUTH_KEY`，局域网内任何设备都能直接拉走明文**。开启前必须
+  确认网络可信；不信任的网络里应保持回环绑定、设置 `BUDDY_SWITCH_AUTH_KEY`，或让用户对
+  所有 Key 选「自行保存」（这样列表里没有明文可漏）。
 
 ### 10.5 数据兼容
 

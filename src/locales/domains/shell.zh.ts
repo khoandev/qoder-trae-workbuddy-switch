@@ -491,6 +491,24 @@ export const zh = {
   "appSettings.creditAutoRefresh.hint":
     "只读本地快照的视图（Trae 积分 / 账号）不受此开关影响：它们不产生上游请求，会一直自动跟随后台同步。",
 
+  // ---- 管理面内置登录（BUDDY_SWITCH_AUTH_KEY；见 components/login-page.tsx）----
+  /* 只有 webui 且服务端设了密钥时才会出现。桌面端走 IPC，没有这个面。 */
+  "auth.login.title": "登录 Buddy Switch",
+  "auth.login.subtitle": "服务已开启访问保护。请输入服务端配置的访问密钥。",
+  "auth.login.keyLabel": "访问密钥",
+  "auth.login.keyPlaceholder": "BUDDY_SWITCH_AUTH_KEY",
+  "auth.login.submit": "登录",
+  "auth.login.submitting": "正在验证…",
+  "auth.login.invalid": "密钥不正确。",
+  "auth.login.failed": "登录失败，请稍后重试。",
+  "auth.login.hint":
+    "密钥由服务端环境变量 BUDDY_SWITCH_AUTH_KEY 提供；登录凭据保存在 HttpOnly Cookie 中。",
+  "auth.session.title": "登录与安全",
+  "auth.logout": "退出登录",
+  "auth.logout.description": "让服务端吊销当前会话，并清除浏览器中的登录 Cookie。",
+  "auth.logout.failed": "退出登录失败，请检查服务是否在线。",
+  "auth.session.expired": "登录已过期，请重新登录。",
+
   // ---- 通用兜底 ----
   "common.unknownError": "未知错误",
 

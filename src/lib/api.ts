@@ -172,6 +172,19 @@ const API_BASE =
     ? "http://127.0.0.1:57890"
     : window.location.origin;
 
+/**
+ * 「服务端要求登录」事件（见 `webui-auth.ts`）。
+ *
+ * 由 [`httpCall`] 在收到 `401` 时派发：任何一个管理面接口都可能先于登录态探测
+ * 撞上 401（比如另一个标签页里登出了），只靠启动时那一问，用户会停在一个空的应用壳上。
+ */
+export const AUTH_REQUIRED_EVENT = "buddy-switch:auth-required";
+
+/** 管理面 API 的基地址（认证模块要用，见 `webui-auth.ts`）。 */
+export function apiBaseUrl(): string {
+  return API_BASE;
+}
+
 const DEMO_READ_COMMANDS = new Set([
   "get_status", "get_accounts",
   // P5 T03 · 参数化只读命令（前端改调它，故演示模式必须有对应数据）。
@@ -802,6 +815,16 @@ async function httpCall<T>(cmd: string, args?: Record<string, unknown>): Promise
     });
   } catch {
     throw new Error(t("shared.api.unreachable", { base: API_BASE }));
+  }
+  // ★ 内置登录（`BUDDY_SWITCH_AUTH_KEY`）：服务端对未登录的 `/api/*` 一律回 401。
+  //   在这里**统一**派发事件，而不是让每个调用点自己判断 —— 否则漏掉一处就是
+  //   「某个页面莫名其妙空白」。`credentials` 用 fetch 默认的 `same-origin`：webui
+  //   与 API 同源，会话 Cookie 会自动带上，不需要显式配置。
+  if (res.status === 401) {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+    }
+    throw new Error(t("auth.session.expired"));
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

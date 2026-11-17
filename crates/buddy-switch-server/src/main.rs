@@ -22,8 +22,10 @@
 //! 与本组变量无关。
 
 mod api;
-// 管理面的来源校验（Host / Origin / Content-Type）。**必须在 `api::router()` 之前装载策略。**
+// 管理面的来源校验（Host / Origin / Content-Type）。**必须在 `api::router_with_auth(...)` 之前装载策略。**
 mod api_guard;
+// 管理面**内置登录**（`BUDDY_SWITCH_AUTH_KEY` + HttpOnly 会话 Cookie）。
+mod app_auth;
 mod gateway_host;
 // Qoder 网关（第三个平台，默认 57895）：独立端口，不与另三个 merge（axum 同路径 merge 会 panic）。
 mod qoder_gateway_host;
@@ -504,11 +506,15 @@ async fn serve(args: &[String]) {
     let host = resolve_host(args, std::env::var(BUDDY_SWITCH_HOST_ENV).ok().as_deref());
 
     // ★ 安全审计 P0-1：装载管理面的 Host 白名单（默认只有回环）。
-    //   必须在 `api::router()` 之前 —— `router()` 里的中间件会在构造时取策略。
+    //   必须在 `api::router_with_auth(...)` 之前 —— `router()` 里的中间件会在构造时取策略。
     let allowed_hosts = std::env::var(api_guard::ALLOWED_HOSTS_ENV).ok();
     api_guard::init(allowed_hosts.as_deref());
 
-    let app = api::router();
+    // ★ 内置登录：密钥只从环境变量读（未设置 / 空串 ⇒ 关闭，既有行为不变）。
+    //   策略随路由走（`Extension` + `from_fn_with_state`），不落任何全局可变状态。
+    let auth_key = std::env::var(app_auth::AUTH_KEY_ENV).ok();
+    let auth_policy = app_auth::AuthPolicy::from_env(auth_key.as_deref());
+    let app = api::router_with_auth(auth_policy.clone());
     let addr = format!("{host}:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -529,7 +535,9 @@ async fn serve(args: &[String]) {
     if !is_loopback_host(&host) {
         println!(
             "⚠️  webui 正对外监听（{host}）—— 它能读写账号库与网关 Key。\
-             请确保只在可信网络内暴露，或用反向代理加上鉴权。"
+             请确保只在可信网络内暴露，或设置 {} 开启内置登录（推荐），\
+             或用反向代理加上鉴权。",
+            app_auth::AUTH_KEY_ENV
         );
         // ★ 安全审计 P0-1：管理面默认只接受回环 Host。对外监听时**必须**告知怎么放开，
         //   否则远程用户只会看到一个 403，然后以为软件坏了。
@@ -545,6 +553,20 @@ async fn serve(args: &[String]) {
             ),
         }
     }
+    // ★ 内置登录的状态必须**明说**（但**绝不说出密钥本身**）：
+    //   「以为开了其实没开」是这类功能最常见的失败方式 —— 环境变量拼错、
+    //   compose 里写成了注释、`export` 只对当前 shell 生效，症状都一样。
+    if auth_policy.enabled() {
+        println!(
+            "管理面登录: 已开启（密钥来自 {}）",
+            app_auth::AUTH_KEY_ENV
+        );
+    } else if auth_key.is_some() {
+        println!(
+            "⚠️  {} 为空，管理面登录未开启。",
+            app_auth::AUTH_KEY_ENV
+        );
+    }
     println!("按 Ctrl+C 停止服务。");
 
     // ★ 运行日志：装 panic hook + 写启动横幅（版本 / 平台 / 数据目录 / 级别）。
@@ -552,6 +574,10 @@ async fn serve(args: &[String]) {
     //   而 Docker 部署时控制台输出常常没人留。
     runtime_log::init("Buddy Switch 服务端");
     runtime_log::info("startup", format!("webui 监听 {addr}"));
+    if auth_policy.enabled() {
+        // 只记事实，不记密钥：运行日志会在 webui 里明文展示，也可能被用户贴进工单。
+        runtime_log::info("startup", "管理面登录已开启");
+    }
 
     let no_open = args.iter().any(|a| a == "--no-open");
     if !no_open {

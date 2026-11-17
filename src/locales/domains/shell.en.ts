@@ -481,6 +481,23 @@ export const en = {
   "appSettings.creditAutoRefresh.hint":
     "Views that only re-read local snapshots (Trae credits / accounts) are unaffected: they make no upstream requests and keep following the background sync.",
 
+  // ---- Management-surface login (BUDDY_SWITCH_AUTH_KEY; see components/login-page.tsx) ----
+  "auth.login.title": "Sign in to Buddy Switch",
+  "auth.login.subtitle": "This server is protected. Enter the access key configured on the server.",
+  "auth.login.keyLabel": "Access key",
+  "auth.login.keyPlaceholder": "BUDDY_SWITCH_AUTH_KEY",
+  "auth.login.submit": "Sign in",
+  "auth.login.submitting": "Verifying…",
+  "auth.login.invalid": "Incorrect key.",
+  "auth.login.failed": "Sign-in failed. Please try again.",
+  "auth.login.hint":
+    "The key comes from the server's BUDDY_SWITCH_AUTH_KEY environment variable; the session is kept in an HttpOnly cookie.",
+  "auth.session.title": "Sign-in & security",
+  "auth.logout": "Sign out",
+  "auth.logout.description": "Revokes the session on the server and clears the cookie in this browser.",
+  "auth.logout.failed": "Sign-out failed. Check that the server is reachable.",
+  "auth.session.expired": "Your session expired. Please sign in again.",
+
   // ---- Shared fallbacks ----
   "common.unknownError": "Unknown error",
 

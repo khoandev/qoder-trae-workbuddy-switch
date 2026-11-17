@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
+import { AuthGate } from "./components/auth-gate";
 import { CompanionApp } from "./components/companion/companion-app";
 import { ErrorBoundary } from "./components/error-boundary";
 import { initLocale } from "./lib/i18n";
@@ -28,7 +29,11 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         {/* 错误边界必须包住两者：React 在未捕获的渲染错误上会卸载整棵树，
             而桌面端没有控制台可看 —— 没有它，任何一处渲染异常都表现为「一片白」。 */}
     <ErrorBoundary>
-      {isCompanionWindow ? <CompanionApp /> : <App />}
+      {/* 登录闸门也包住两者：webui 开了内置登录时，悬浮窗那条 URL 同样不该绕过它
+          （它读的是同一批账号 / 用量数据）。桌面端与演示模式下闸门恒为放行。 */}
+      <AuthGate>
+        {isCompanionWindow ? <CompanionApp /> : <App />}
+      </AuthGate>
     </ErrorBoundary>
   </React.StrictMode>,
 );

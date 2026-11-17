@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw, Save } from "lucide-react";
+import { ArrowUpCircle, ExternalLink, Loader2, LogOut, RefreshCw, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import { DemoAction } from "@/components/demo-action";
@@ -22,6 +22,7 @@ import { SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
 import { planScopeShortcuts, SCOPE_SHORTCUT_LIMIT } from "@/lib/scope-shortcuts";
 import { useVisibleScopes } from "@/lib/scope-visibility";
 import { useShortcutsEnabled } from "@/lib/shortcut-preference";
+import { logoutWebui, useWebuiAuth } from "@/lib/webui-auth";
 import {
   getThemePreference,
   isThemePreference,
@@ -850,8 +851,52 @@ function CreditsAutoRefreshCard({ variant }: { variant: AppSettingsVariant }) {
 }
 
 /**
+ * 登录与安全：吊销当前会话（只在 webui **开了内置登录**时出现）。
+ *
+ * ## 为什么门禁在这里而不是交给调用方
+ *
+ * 桌面端走 `invoke`、演示构建没有服务端 —— 两者都没有「会话」这个东西。把
+ * `auth === "authenticated"` 的判断写在调用处，就会出现「抽屉里有一块、设置页
+ * 没有」的双份实现（`settings-primitives` 漂移的同一种病）。
+ */
+function SessionCard({ variant }: { variant: AppSettingsVariant }) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+
+  async function onLogout() {
+    setBusy(true);
+    try {
+      // 成功后 store 切到 `required` ⇒ `AuthGate` 换掉整棵树（本组件随之卸载），
+      // 因此这里**不需要**再 setBusy(false)。
+      await logoutWebui();
+    } catch (e) {
+      toast.error(api.asError(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SettingsGroup id="settings-session" title={t("auth.session.title")} variant={variant}>
+      <GroupBody variant={variant}>
+        <SettingsFieldRow
+          className="border-b-0"
+          label={t("auth.logout")}
+          description={t("auth.logout.description")}
+          stacked={variant === "plain"}
+        >
+          <Button variant="outline" size="sm" onClick={() => void onLogout()} disabled={busy}>
+            <LogOut aria-hidden />
+            {t("auth.logout")}
+          </Button>
+        </SettingsFieldRow>
+      </GroupBody>
+    </SettingsGroup>
+  );
+}
+
+/**
  * 应用框架设置的**唯一出口**（语言 / 外观 / 快捷键 / 启动与托盘 / 授权 / 更新 /
- * 作用域可见性 / 积分自动刷新）—— 只由顶栏 ⚙「应用设置」抽屉渲染。
+ * 作用域可见性 / 积分自动刷新 / 登录与安全）—— 只由顶栏 ⚙「应用设置」抽屉渲染。
  *
  * ## 为什么不再出现在设置页
  *
@@ -868,6 +913,8 @@ function CreditsAutoRefreshCard({ variant }: { variant: AppSettingsVariant }) {
  * 两个出口不会各长一套。
  */
 export function AppSettingsGroups({ variant = "card" }: { variant?: AppSettingsVariant } = {}) {
+  const auth = useWebuiAuth();
+
   return (
     <>
       <LanguageCard variant={variant} />
@@ -875,6 +922,9 @@ export function AppSettingsGroups({ variant = "card" }: { variant?: AppSettingsV
       <ShortcutsCard variant={variant} />
       {api.isDesktop() || api.isDemoMode() ? <StartupCard variant={variant} /> : null}
       {api.isDesktop() || api.isDemoMode() ? <AuthCard variant={variant} /> : null}
+      {api.isWebui() && !api.isDemoMode() && auth === "authenticated" ? (
+        <SessionCard variant={variant} />
+      ) : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard variant={variant} />}
       <ScopeVisibilityCard variant={variant} />
       <CreditsAutoRefreshCard variant={variant} />

@@ -48,6 +48,8 @@ use buddy_switch_core::modules::product::{
 use buddy_switch_core::modules::qoder::region::QoderRegion;
 use buddy_switch_core::modules::trae::region::TraeRegion;
 
+use crate::app_auth;
+
 /// WorkBuddy 运行状态缓存：Windows 上检测要跑 tasklist（慢），缓存几秒避免
 /// 前端切 tab 频繁触发命令行导致卡顿/闪窗。缓存按 region 分别记录，避免两版串台。
 #[cfg(target_os = "windows")]
@@ -84,21 +86,37 @@ static SWITCH_REGION: Mutex<Option<Region>> = Mutex::new(None);
 
 /// webui 对外路由。
 ///
-/// **merge 顺序（关键，A-1.3 / B-6 要点 12）**：先构造**不含 fallback** 的
-/// `api_routes()`，再 `merge(gateway::router(state))`，**最后**才 `.fallback(...)`。
-/// 否则 axum 会因 fallback 冲突直接 panic。
-pub fn router() -> Router {
+/// **merge 顺序（关键，A-1.3 / B-6 要点 12）**：先构造**不含 fallback** 的管理面
+/// （认证路由 + 受保护的 `api_routes()`），再 `merge(gateway::router(state))`，
+/// **最后**才 `.fallback(...)`。否则 axum 会因 fallback 冲突直接 panic。
+///
+/// ## 三层门，各管一件事
+///
+/// 1. [`crate::api_guard::guard`]（**最外层**，管来源）—— Host / Origin / Content-Type。
+///    它覆盖**全部**管理面（含 `/api/auth/*`：登录端点也只该接受同源请求）。
+/// 2. [`app_auth::require_auth`]（只挂 `api_routes()`，管身份）—— 会话 Cookie。
+///    **不**挂 `app_auth::routes()`：登录端点自己就是发 Cookie 的那一头。
+/// 3. 网关树自带 Bearer 鉴权，`merge` 进来即可 —— 管理面的 Host 策略与 Cookie
+///    都不该牵连它（OpenAI / Anthropic 客户端不是浏览器，没有 Cookie）。
+///
+/// ## 静态资源**刻意公开**
+///
+/// `dist` 与 `index.html` 不含任何凭据，而且**登录页本身就是它们渲染的** —— 把静态
+/// 资源也挡在认证后面，用户会看到一句 401 而不是登录框。数据面全在 `/api/*` 上。
+pub(crate) fn router_with_auth(policy: app_auth::AuthPolicy) -> Router {
     let gateway_state = crate::gateway_host::shared_state();
-    // ★ 安全审计 P0-1：**管理面必须有来源校验**。
-    //
-    // 这里 `.layer(...)` 的位置很关键：它在 `merge` **之前**，所以只作用于
-    // `api_routes()`（`/api/*`）；网关那棵树有自己的 Bearer 鉴权与独立端口，
-    // 不该被 webui 的 Host 策略牵连。
-    //
-    // 也不能挂在最外层：那会把 `static_handler`（SPA 静态资源）一起拦掉，
-    // 而静态资源是公开的、且它的 GET 请求不带 `Content-Type`。
-    api_routes()
-        .layer(axum::middleware::from_fn(crate::api_guard::guard))
+
+    let management = app_auth::routes()
+        .merge(api_routes().layer(axum::middleware::from_fn_with_state(
+            policy.clone(),
+            app_auth::require_auth,
+        )))
+        // `Extension` 让 handler 取到策略（中间件走 `from_fn_with_state`）。装配漏了
+        // 它 ⇒ 那些 handler 直接 500，而不是「忘了装策略就放行所有人」。
+        .layer(axum::Extension(policy))
+        .layer(axum::middleware::from_fn(crate::api_guard::guard));
+
+    management
         .merge(buddy_switch_gateway::router(gateway_state))
         .fallback(static_handler)
 }
@@ -5865,10 +5883,11 @@ mod tests {
 
     use super::{
         api_routes, cache_control_for, checkin_status_item, parse_region, parse_region_filter,
-        query_flag_enabled, query_value, router, Assets,
+        query_flag_enabled, query_value, router_with_auth, Assets,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Method, Request, StatusCode};
+    use axum::Router;
     use buddy_switch_core::modules::config::BUDDY_SWITCH_HOME_ENV;
     use buddy_switch_core::modules::region::{Region, RegionFilter};
     use serde_json::{json, Value};
@@ -5983,7 +6002,17 @@ mod tests {
         (status, value)
     }
 
-    /// 驱动完整 `router()`（含静态 fallback），返回 (状态码, content-type, body 文本)。
+    /// 完整路由（**认证关闭**）—— 既有用例全都假定「管理面只要过来源校验就可用」。
+    ///
+    /// ★ 认证本身由 `app_auth::tests` 与
+    /// `auth_login_unlocks_management_api_and_logout_revokes_session` 覆盖；
+    /// 这里显式关掉认证，是为了让「来源校验 / 静态资源 / 缓存头」这些用例的
+    /// 断言只测它们自己那一层。
+    fn test_router() -> Router {
+        router_with_auth(crate::app_auth::AuthPolicy::from_env(None))
+    }
+
+    /// 驱动完整 `router_with_auth(...)`（含静态 fallback），返回 (状态码, content-type, body 文本)。
     async fn call_full(method: Method, uri: &str) -> (StatusCode, String, String) {
         let request = Request::builder()
             .method(method)
@@ -5991,7 +6020,7 @@ mod tests {
             .header("host", "127.0.0.1:57890")
             .body(Body::empty())
             .unwrap();
-        let response = router().oneshot(request).await.expect("router call");
+        let response = test_router().oneshot(request).await.expect("router call");
         let status = response.status();
         let content_type = response
             .headers()
@@ -6009,7 +6038,7 @@ mod tests {
         )
     }
 
-    /// 驱动**完整** `router()`（含 `api_guard` 中间件），只回状态码。
+    /// 驱动**完整** `router_with_auth(...)`（含 `api_guard` 中间件，认证关闭），只回状态码。
     ///
     /// 三个 header 分别对应 guard 的三条判据，`None` 表示该头**不发送**。
     async fn status_with_headers(
@@ -6031,7 +6060,7 @@ mod tests {
                 builder = builder.header(name, value);
             }
         }
-        router()
+        test_router()
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .expect("router call")
@@ -6128,7 +6157,7 @@ mod tests {
             .header("host", "127.0.0.1:57890")
             .body(Body::empty())
             .unwrap();
-        let response = router().oneshot(request).await.expect("router call");
+        let response = test_router().oneshot(request).await.expect("router call");
         let status = response.status();
         let value = response
             .headers()
@@ -6137,6 +6166,187 @@ mod tests {
             .unwrap_or("")
             .to_string();
         (status, value)
+    }
+
+    /// 驱动一次管理面请求（Host 固定回环、按需带 Cookie / JSON body）。
+    ///
+    /// 返回 (状态码, 响应头, JSON body)；非 JSON 响应回 `Value::Null`。
+    async fn auth_call(
+        app: Router,
+        method: Method,
+        uri: &str,
+        cookie: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:57890")
+            .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", cookie);
+        }
+        let request = builder
+            .body(match body {
+                Some(value) => Body::from(serde_json::to_vec(&value).unwrap()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let response = app.oneshot(request).await.expect("router call");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, headers, value)
+    }
+
+    /// ★★ 内置登录的**接线**防线：策略换成「已开启」后，`/api/*` 必须先登录。
+    ///
+    /// 这条与 `app_auth::tests` 的分工：那边证明 policy / session / cookie / 中间件
+    /// 各自判得对，这里证明它们**真的挂进了 `router_with_auth`**，并且挂在了正确的
+    /// 那棵子树上（`api_routes()` 而不是静态资源、不是网关）。
+    ///
+    /// 变异验证：把 `api_routes().layer(...require_auth)` 去掉 ⇒ 本用例第 2 步立刻红。
+    #[tokio::test]
+    async fn auth_login_unlocks_management_api_and_logout_revokes_session() {
+        let _home = isolated_home();
+        let _guard = test_guard();
+        let app = || router_with_auth(crate::app_auth::AuthPolicy::from_env(Some("test-key")));
+
+        // ① 静态资源**公开**：登录页是 SPA 渲染的，首页必须能加载出来。
+        let (status, headers, _) = auth_call(app(), Method::GET, "/", None, None).await;
+        assert_eq!(status, StatusCode::OK, "登录页所在的首屏必须公开可读");
+        assert!(
+            headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .starts_with("text/html"),
+            "首页应是 text/html"
+        );
+
+        // ② 没会话 ⇒ `/api/*` 401，且不带 `WWW-Authenticate`（否则浏览器弹原生登录框）。
+        let (status, headers, body) = auth_call(app(), Method::GET, "/api/status", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["reason"], "unauthorized", "{body}");
+        assert!(
+            headers.get("www-authenticate").is_none(),
+            "401 不能带 WWW-Authenticate"
+        );
+        assert_eq!(
+            headers
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store"),
+            "认证失败响应必须 no-store"
+        );
+
+        // ③ 状态端点自己**不需要**登录：前端靠它决定画登录页还是画应用。
+        let (status, _, body) = auth_call(app(), Method::GET, "/api/auth/status", None, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["required"], true, "{body}");
+        assert_eq!(body["authenticated"], false, "{body}");
+
+        // ④ 错密钥 ⇒ 401 invalid_key。
+        let (status, _, body) = auth_call(
+            app(),
+            Method::POST,
+            "/api/auth/login",
+            None,
+            Some(json!({ "key": "wrong" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["reason"], "invalid_key", "{body}");
+
+        // ⑤ 对密钥 ⇒ 200 + Set-Cookie。
+        let (status, headers, body) = auth_call(
+            app(),
+            Method::POST,
+            "/api/auth/login",
+            None,
+            Some(json!({ "key": "test-key" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ok"], true, "{body}");
+        let set_cookie = headers
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .expect("登录成功必须下发 Set-Cookie");
+        assert!(set_cookie.contains("buddy_switch_session="), "{set_cookie}");
+        assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+        assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+        assert!(cookie.starts_with("buddy_switch_session="), "{cookie}");
+
+        // ⑥ 带上会话 Cookie 后同一端点放行。
+        let (status, _, body) = auth_call(
+            app(),
+            Method::GET,
+            "/api/status",
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "有效会话必须放行: {body}");
+
+        // ⑦ 状态端点如实报「已登录」。
+        let (status, _, body) = auth_call(
+            app(),
+            Method::GET,
+            "/api/auth/status",
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["required"], true, "{body}");
+        assert_eq!(body["authenticated"], true, "{body}");
+
+        // ⑧ 登出 ⇒ 吊销 + 清 Cookie。
+        let (status, headers, body) = auth_call(
+            app(),
+            Method::POST,
+            "/api/auth/logout",
+            Some(&cookie),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cleared = headers
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .expect("登出必须清 Cookie");
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+
+        // ⑨ 旧 Cookie 立刻失效 —— 这才是「吊销」而不只是「清浏览器」。
+        let (status, _, body) = auth_call(app(), Method::GET, "/api/status", Some(&cookie), None)
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "登出后旧会话必须失效: {body}"
+        );
+    }
+
+    /// 反向护栏：**没设密钥时管理面照旧开放**。既有的 serve / Docker / npm 用法
+    /// 升级后不该突然进不去。
+    #[tokio::test]
+    async fn auth_disabled_keeps_management_api_open() {
+        let _home = isolated_home();
+        let _guard = test_guard();
+        let app = || router_with_auth(crate::app_auth::AuthPolicy::from_env(None));
+
+        let (status, _, body) = auth_call(app(), Method::GET, "/api/status", None, None).await;
+        assert_eq!(status, StatusCode::OK, "auth 关闭时管理面必须可直接访问: {body}");
+
+        let (status, _, body) = auth_call(app(), Method::GET, "/api/auth/status", None, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["required"], false, "{body}");
+        assert_eq!(body["authenticated"], true, "{body}");
     }
 
     // -----------------------------------------------------------------------

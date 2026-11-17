@@ -157,7 +157,7 @@ curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/khoandev/buddy-swit
 
 ---
 
-## 配置：三个环境变量
+## 配置：环境变量
 
 | 变量 | 默认 | 说明 |
 |:---|:---|:---|
@@ -165,6 +165,7 @@ curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/khoandev/buddy-swit
 | `BUDDY_SWITCH_HOST` | `0.0.0.0`（镜像内置） | 监听地址。CLI 原生默认是 `127.0.0.1`，容器里必须改成 `0.0.0.0` 才能从宿主访问。 |
 | `BUDDY_SWITCH_PORT` | `57890` | 监听端口。 |
 | `BUDDY_SWITCH_ALLOWED_HOSTS` | 空（只接受回环） | **额外**允许的 `Host`，逗号分隔、可带端口。**只有「跨机直连」才需要** —— 见下面「安全」段。填 `*` 无效（会被忽略）。 |
+| `BUDDY_SWITCH_AUTH_KEY` | 空（不开登录） | **管理面登录密钥**。设置后访问 webui 需先输入该密钥；会话 Cookie 有效期 7 天，服务重启后需重新登录。建议用 ≥16 位随机串。 |
 
 优先级：**命令行参数 > 环境变量 > 内置默认值**。即 `docker run … buddy-switch serve --port 8080`
 会覆盖 `BUDDY_SWITCH_PORT`。
@@ -222,8 +223,13 @@ docker run --rm -v buddy-switch-data:/data -v "$PWD:/backup" alpine \
 
 ## 安全
 
-**webui 没有登录，能读写账号库与网关 Key。** 因此：
+**webui 默认没有登录；设置 `BUDDY_SWITCH_AUTH_KEY` 后，访问管理面需先输入该密钥
+（HttpOnly + SameSite=Strict 会话 Cookie，7 天有效，服务重启后失效）。** 它能读写账号库
+与网关 Key，所以：
 
+- **想挡住陌生人，就先设 `BUDDY_SWITCH_AUTH_KEY`**（不只是跨机访问；任何能被别人
+  打开的端口都值得设）。密钥走 `POST /api/auth/login` 的请求体，因此**对外暴露时
+  必须套 TLS / 反向代理** —— 明文 HTTP 下密钥在同一条链路上裸奔。
 - 默认只发布到宿主机回环 `127.0.0.1:57890`（`docker-compose.yml` 里写死的）。
 - 服务端在监听**非回环**地址时会打印一条显式警告。
 - **管理面有来源校验**：只接受 `Host` 为 `127.0.0.1` / `localhost` / `::1` 的请求，
@@ -253,7 +259,9 @@ docker run --rm -v buddy-switch-data:/data -v "$PWD:/backup" alpine \
      ```
   3. **直连**（不推荐）：`"57890:57890"` + 从别的机器访问 `http://<ip>:57890`。
      **必须**设 `BUDDY_SWITCH_ALLOWED_HOSTS=<ip 或域名>:57890`，否则一律 403。
-- **不要**在无鉴权的情况下把 `57890` 直接暴露到公网或不可信局域网。
+     跨机场景请同时设 `BUDDY_SWITCH_AUTH_KEY`。
+- **不要**在既无 `BUDDY_SWITCH_AUTH_KEY` 又无反代鉴权的情况下把 `57890` 直接暴露到
+  公网或不可信局域网。
 
 ### 为什么要有 Host 校验（升级后看到 403 就是它）
 
