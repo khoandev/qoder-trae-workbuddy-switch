@@ -447,6 +447,9 @@ pub fn apply_with_salt(
     nonce: u64,
     headers: &mut HashMap<String, String>,
 ) -> bool {
+    if !enabled_for(account) {
+        return false;
+    }
     let Some(uid) = account_uid(account) else {
         return false;
     };
@@ -487,6 +490,9 @@ pub fn apply_mp_with_salt(
     nick: &str,
     headers: &mut HashMap<String, String>,
 ) -> bool {
+    if !enabled_for(account) {
+        return false;
+    }
     let Some(uid) = account_uid(account) else {
         return false;
     };
