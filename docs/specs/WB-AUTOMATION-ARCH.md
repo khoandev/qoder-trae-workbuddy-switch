@@ -33,10 +33,9 @@
 
 | # | 能力 | wb2api 参考 | 本仓现状 | 本期落点 |
 |:--|:--|:--|:--|:--|
-| 1 | 任务清单 | `GET /v2/activity/growth/tasks`（桌面头）；`TASK_SPECS` 27 条（`wb_tasks.py:137`；本仓 2026-11-16 实测该 dict 有 27 个键，早前文档写的 24 是错的）+ 清单带 `ex_*` 时动态解析专家（`wb_tasks.py:481`） | `cat.rs:29` 只取同一端点筛 `black_cat` | 通用引擎，`feature=growth_tasks`；元数据在 `task_catalog.rs`（§3.4） |
-| 2 | 批量接取 | `POST /v2/activity/growth/tasks/accept`，体 `{"task_codes":[…]}`，每批 20；逐批记录 `accepted` / `already_accepted` / `failed`，失败**不吞**（`wb_tasks.py:359`） | 只接 `black_cat` | 通用；失败逐条可见 |
+| 1 | 任务清单 | `GET /v2/activity/growth/tasks`（桌面头）；`TASK_SPECS` 27 条（`wb_tasks.py:137`；本仓 2026-11-16 实测该 dict 有 27 个键，早前文档写的 24 是错的）+ 清单带 `ex_*` 时动态解析专家（`wb_tasks.py:481`） | `cat.rs:29` 只取同一端点筛 `black_cat` | 通用引擎（§3.6），`feature=growth_tasks`；元数据在 `task_catalog.rs`（§3.4） |
+| 2 | 批量接取 | `POST /v2/activity/growth/tasks/accept`，体 `{"task_codes":[…]}`，每批 20；逐批记录 `accepted` / `already_accepted` / `failed`，失败**不吞**（`wb_tasks.py:359`） | 只接 `black_cat` | `task_engine`（§3.6）：分批 + 复读 + 只重试一次，失败逐条可见 |
 | 3 | 事件上报 | `POST /v2/report`；上游按 `(eventCode, id)` 去重 ⇒ 专家/团队 id 必须互异（`wb_tasks.py:1210`），`EXPERT_ID_POOL` 18 条（`:234`）、`TEAM_ID_POOL` 8 条 | `activity.rs` 的 `/v2/report` 构造器只有对话/心跳类事件 | 收口到 `task_event`（§3.5）：按 `kind` 生成，`(eventCode, id)` 每次尝试互异 |
-***
 | 4 | 复读进度再领奖 | 上报后最多 6 次复读（1.5s / 涨了再 2.5s），未达 `target` 则**顺延到下一轮**（`wb_tasks.py:1241`–`1252`） | `cat.rs` 有同类轮询 | 固化为 verify-before-claim（§4） |
 | 5 | 领奖 | `POST /activity/growth/tasks/{code}/claim`，体 `{}`；`400 task not completed` 不当致命错（`wb_tasks.py:426`） | `black_cat` 有 | 通用 |
 | 6 | 小程序族 | `MP_TASK_SPECS`（`Sequential_Tasks_1..6` + `school_season`，`wb_tasks.py:52`）；头 `X-Client-Product: workbuddy-mp`、`X-Client-Version: 2.4.0`、`X-Client-Platform: mp-weixin`、`X-Platform: wechatmp` + 微信小程序 UA（`:38`–`:51`） | 无（`school.rs` 只做校园日） | 独立 `feature=mp_tasks` |
@@ -193,6 +192,51 @@ runner 里不许再出现任务码字面量、`target` 数字、专家 id。内�
 验证：`cargo test -p buddy-switch-core --lib modules::task_event`（15 条，含逐 kind 必填字段、
 跨轮 id 唯一、id 池轮转、6 连对话、小程序 kind 映射与未知码、两份信封、活动四类判据、
 活动页面上下文、去重键、凭证扫描）。
+
+### 3.6 成长任务引擎（`task_engine`：读 → 排序 → 接取）
+
+`crates/buddy-switch-core/src/modules/task_engine.rs` 负责流水线的**前半段**：
+读清单（`fetch_growth_tasks:255`）→ 排序 → 每 20 条一批接取（`accept_tasks:359`）→
+复读 → **只重试一次**（`run_growth_tasks:1821`）。上报事件与领奖**不在**这里。
+
+```
+GET  {chat_base}/v2/activity/growth/tasks
+  → plan_accept(清单, 当日台账, now)   ← 纯函数：接什么 / 不接什么
+  → POST {chat_base}/v2/activity/growth/tasks/accept  {"task_codes":[…≤20]}
+  → GET  …/tasks（复读）→ 仍未接上的码 → 再 POST 一次（到此为止）
+```
+
+六条纪律（都有单测钉住）：
+
+1. **auto 类不接取**：上游对 `task_type == "auto"`（`first_buddy` 等）明确
+   「task does not require acceptance」。它们只进 `AcceptPlan::auto_first`（事件链先跑），
+   一批都不占 —— 把 auto 塞进 accept 只会换来一条失败结果。
+2. **`first_buddy` 是 single 与猫猫旅行的前置**：清单里有它而没完成（`current < target` 且
+   `accept_status == not_accepted`）时，single 一律不接（`prerequisite_first_buddy`），
+   `AcceptPlan::blocked_by` 置 `Some("first_buddy")`。**清单里没有它 = 视为就绪**：
+   老账号的清单不会一直带着它，把「不在清单」当未就绪会永久卡死所有 single 任务。
+3. **不猜、不白占**：目录不认识的码（`unknown_code`）、今天已领（`already_claimed`）、
+   今天已判真人（`needs_human`）、当日失败到顶（`attempts_exhausted`）、已接取
+   （`already_accepted`）—— 都**不进批次**。夜间任务（`black_cat`）只在 CST 23:00–08:00
+   的窗口内才接，窗口外跳过。
+4. **间隔取更严的那个**：`max(引擎 1s, 风控 min_account_gap_ms) + ±25% 抖动`，负抖动
+   **不低于 1s**。风控关着时不采信它的 `min_account_gap_ms`（5s 是风控自己的缺省，
+   开关关掉还照样 5s 等于开关没生效）。抖动是确定性的（同一种子同一结果），
+   边界因此在测试里可以逐值断言。
+5. **台账先写后做**：每个 accept 批次发出**之前**先 `record_action`（进程崩了也留「花掉一个
+   名额」），整批失败再 `record_failure`（脱敏 + 当日 3 次上限）；`needs_human` 在本轮开头就
+   落台账，下一轮连重判都省了。**单条被拒不推进 `attempts`**，只有整批失败才算一次。
+6. **失败逐条可见**：`data.results` 里不是 `accepted` / `already_accepted` 的码记失败，
+   **发了但响应里没提的码也算失败**（参考实现当年正是吞掉这些失败，才出现「接了一堆却
+   一个都没点亮」）。错误文案过 `redact`，不把凭据写进台账。
+
+与参考实现的两处**有意差异**，理由都在上面：夜间任务「窗口内可接」（参考实现整体排除，
+交给 `run_night_growth`）、已完成的 auto 任务不再排进 `auto_first`（参考实现会照跑一遍事件）。
+
+验证：`cargo test -p buddy-switch-core --lib modules::task_engine_accept`（21 条，含清单字段
+优先级、无码行丢弃、auto 先序、`first_buddy` 前置、夜间窗口内外、需真人/已领/已接/未知码/
+失败到顶的跳过、20 条分批、间隔与抖动边界、接取结果三分类、错误脱敏、整轮流水线的
+「GET→POST→GET」「只重试一次」「不该发就不发」以及台账 `actions`/`attempts` 计数）。
 
 ## 4. 台账与 verify-before-claim
 
@@ -459,8 +503,9 @@ TLS1.3→TLS1.2 / 无 GREASE**（`README.md` 的口径是「18 ciphers, 10 exten
 
 **离线（CI 必跑）**
 
-1. `plan()` 的纯函数测试：24 条 `TASK_SPECS` + 7 条小程序 + 两张活动表 → 期望 `Vec<Action>`；
+1. `plan()` 的纯函数测试：27 条 `TASK_SPECS` + 7 条小程序 + 两张活动表 → 期望 `Vec<Action>`；
    覆盖 `unforgeable`、桌面专属、`first_buddy` 前置、夜间窗口、当日已领奖。
+   接取段的判定已落地：`task_engine` 的 `plan_accept`（§3.6）。
 2. 台账测试：同一天重跑不重复上报；`attempts` 上限生效；跨日重置；`atomic_write` 失败回滚。
 3. verify-before-claim 测试：进度未达 → 不发 `Claim`；复读涨到 `target` → 发一次 `Claim`。
 4. 风控准入测试：`risk_control` 关闭时不产生额外请求；暂停/冷却时当轮 0 写请求。

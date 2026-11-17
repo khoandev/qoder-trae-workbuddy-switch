@@ -111,6 +111,15 @@ pub mod task_catalog;
 // WorkBuddy 任务事件构造器：**每个 kind 一份事件体**，`(eventCode, id)` 每次尝试互不相同。
 // 纯函数（`now_ms` / `attempt` 由调用方给），信封只有桌面与小程序两份。见同 spec §3.5。
 pub mod task_event;
+// WorkBuddy 成长任务引擎：读清单 → 排序（auto 类先）→ 每 20 条一批接取 → 复读 → 只重试一次。
+// 前置（`first_buddy`）、夜间窗口、台账「先写后做」都在内核里判；出网只经 `TaskIo`。见同 spec §3.6。
+pub mod task_engine;
+// 成长引擎的离线用例：`task_engine` 的「接什么、不接什么」+ 整轮流水线。
+// 路径刻意落在 `modules::task_engine_accept`，一条命令只跑这一组：
+// `cargo test -p buddy-switch-core --lib modules::task_engine_accept`。
+#[cfg(test)]
+#[path = "task_engine/accept_tests.rs"]
+mod task_engine_accept;
 // WorkBuddy 任务链的**唯一出网点**（`TaskIo` trait + 真实实现 + 测试替身）：
 // 准入 → 请求 → 结果回写，三步顺序不可颠倒。见 `docs/specs/WB-AUTOMATION-ARCH.md` §3.
 pub mod task_io;
