@@ -15,10 +15,12 @@ use crate::modules::task_catalog::{self, GROWTH_TASKS};
 use crate::modules::task_engine::{
     chunk, first_buddy_ready, jitter_pct, order_for_run, parse_accept, parse_list, plan_accept,
     run_accept_round, step_gap_ms, AcceptStatus, EngineConfig, GrowthTask, SkipReason, TaskClass,
-    ACCEPT_CHUNK, ACCEPT_PATH, ENGINE_GAP_MS, FIRST_BUDDY, GROWTH_FEATURE, TASKS_PATH,
+    ACCEPT_CHUNK, ACCEPT_PATH, BLACK_CAT, ENGINE_GAP_MS, FIRST_BUDDY, GROWTH_FEATURE, TASKS_PATH,
 };
 use crate::modules::task_io::{FakeTaskIo, WORKBUDDY_PRODUCT};
-use crate::modules::task_ledger::{ClaimedTask, TaskDayEntry, TaskDayKey, TaskLedger, LEDGER_FILE};
+use crate::modules::task_ledger::{
+    ClaimedTask, TaskDayEntry, TaskDayKey, TaskLedger, LEDGER_FILE, MAX_ATTEMPTS_PER_DAY,
+};
 
 /// 2026-11-16 08:00 CST（夜间窗口**外**）。
 const NOW: i64 = 1_794_787_200_000;
@@ -211,21 +213,74 @@ fn first_buddy_is_ready_when_the_list_no_longer_offers_it() {
 }
 
 #[test]
-fn night_task_is_skipped_outside_the_window_and_accepted_inside() {
+fn black_cat_belongs_to_the_night_scheduler_only() {
+    // `black_cat` 另起 `run_night_growth`（参考实现同款）：成长链路在**任何**时段都不接它，
+    // 否则同一任务会被两套调度各报一遍事件。
     let parsed = parse(vec![
-        raw("black_cat", "single", "not_accepted", 0),
+        raw(BLACK_CAT, "single", "not_accepted", 0),
         raw("chat_5", "single", "not_accepted", 0),
     ]);
-    let out_of_window = plan_accept(&parsed, &TaskDayEntry::default(), NOW);
-    assert_eq!(
-        reasons(&out_of_window),
-        vec![("black_cat", SkipReason::NightOutsideWindow)]
-    );
-    assert_eq!(out_of_window.codes(), vec!["chat_5"]);
+    for now in [NOW, NIGHT] {
+        let plan = plan_accept(&parsed, &TaskDayEntry::default(), now);
+        assert_eq!(plan.codes(), vec!["chat_5"], "now={now}");
+        assert_eq!(
+            reasons(&plan),
+            vec![(BLACK_CAT, SkipReason::NightOwnedByCat)],
+            "now={now}"
+        );
+    }
 
-    let in_window = plan_accept(&parsed, &TaskDayEntry::default(), NIGHT);
-    assert_eq!(in_window.codes(), vec!["black_cat", "chat_5"]);
-    assert!(in_window.skipped.is_empty());
+    // 已完成时归 runner 的 claim 通道：奖励照领，不能被「夜间独占」拦下。
+    let done = parse(vec![raw(BLACK_CAT, "single", "accepted", 1)]);
+    let plan = plan_accept(&done, &TaskDayEntry::default(), NOW);
+    assert_eq!(
+        reasons(&plan),
+        vec![(BLACK_CAT, SkipReason::AlreadyAccepted)]
+    );
+}
+
+#[test]
+fn auto_tasks_never_wait_for_accept_status() {
+    // 上游对 auto 类的 `accepted` 不代表任何东西：把它当「已接取」跳过后，
+    // 事件链就永远没有机会点亮它。
+    let parsed = parse(vec![raw(FIRST_BUDDY, "auto", "accepted", 0)]);
+    let plan = plan_accept(&parsed, &TaskDayEntry::default(), NOW);
+    assert_eq!(plan.auto_first, vec![FIRST_BUDDY.to_string()]);
+    assert_eq!(
+        reasons(&plan),
+        vec![(FIRST_BUDDY, SkipReason::AutoNoAccept)]
+    );
+}
+
+#[test]
+fn completed_tasks_are_never_marked_needs_human_or_attempt_capped() {
+    // 做完的「需真人」任务只剩领奖。判真人 / 失败到顶都不该拦它，否则奖励永远领不到。
+    let parsed = parse(vec![raw(
+        "wb_wechat_oa_subscribe_task",
+        "single",
+        "accepted",
+        1,
+    )]);
+    let mut entry = TaskDayEntry::default();
+    entry.attempts = MAX_ATTEMPTS_PER_DAY;
+    let plan = plan_accept(&parsed, &entry, NOW);
+    assert!(plan.needs_human.is_empty(), "已完成不判真人");
+    assert_eq!(
+        reasons(&plan),
+        vec![(
+            "wb_wechat_oa_subscribe_task",
+            SkipReason::AlreadyAccepted
+        )]
+    );
+}
+
+#[test]
+fn accepted_first_buddy_alone_does_not_unlock_single_tasks() {
+    // 前置是「完成」，不是「接到手」：上游回的是 `prerequisite not met: first_buddy`。
+    let accepted_only = parse(vec![raw(FIRST_BUDDY, "auto", "accepted", 0)]);
+    assert!(!first_buddy_ready(&accepted_only, &TaskDayEntry::default()));
+    let complete = parse(vec![raw(FIRST_BUDDY, "auto", "accepted", 1)]);
+    assert!(first_buddy_ready(&complete, &TaskDayEntry::default()));
 }
 
 #[test]

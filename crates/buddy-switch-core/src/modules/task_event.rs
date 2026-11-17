@@ -255,11 +255,26 @@ pub fn idempotency_key(event: &Value) -> Option<(String, String)> {
 
 /// 构造一个桌面成长任务的事件链。
 ///
-/// 返回空 vec 的两种情况：
+/// 返回空 vec 的三种情况：
 /// - [`TaskKind::SkillShare`]：必须先真的建出分享渠道，用 [`skill_share_chain`]（`share_code`
 ///   是 `id`，凭空编会在上游撞键）；
-/// - [`TaskKind::Buddy5`]：盲盒走 `/travel/*` 契约，没有事件链。
+/// - [`TaskKind::Buddy5`]：盲盒走 `/travel/*` 契约，没有事件链；
+/// - [`TaskKind::Template`]：单帧不推进 `template_5`，四帧组见 [`template_chain`]。
 pub fn desktop(kind: TaskKind, user: &EventUser<'_>, ids: &EventIds) -> Vec<Value> {
+    desktop_for_task(kind, user, ids, None)
+}
+
+/// 同 [`desktop`]，但允许把**目录指定的固定专家**钉进 `expert_actual_use`。
+///
+/// 为什么需要：`expert_use_maidehao` / `Expert_lighthouse` 这类任务的判据认**某个具体专家**
+/// （上游对比 `id`）。按 `attempt` 轮转池子会稳定地发出别人，任务永远点不亮。
+/// `expert == None` 时行为与 [`desktop`] 逐字相同（普通 expert / team 仍按 attempt 轮转）。
+pub fn desktop_for_task(
+    kind: TaskKind,
+    user: &EventUser<'_>,
+    ids: &EventIds,
+    expert: Option<(&str, &str)>,
+) -> Vec<Value> {
     let now = ids.now_ms();
     let cid = ids.conversation_id();
     let rid = ids.request_id();
@@ -281,20 +296,12 @@ pub fn desktop(kind: TaskKind, user: &EventUser<'_>, ids: &EventIds) -> Vec<Valu
             "isSuccessful": true,
             "userId": uid,
         })],
-        TaskKind::Template => vec![json!({
-            "eventCode": "agent_task_created_with_template",
-            "timestamp": now,
-            "reportDelay": 0,
-            "isCustomModel": true,
-            // 参考实现用任务下标；这里用尝试序号，保证跨轮不重复。
-            "id": ids.attempt().to_string(),
-            "name": "幻灯片",
-            "requestId": rid,
-            "conversationId": cid,
-            "userId": uid,
-        })],
+        // 单帧模板事件不会推进 `template_5`（参考实现 `_template_events` 是四帧一组），
+        // 所以这里不再造一个「看着像」的帧，交给 `template_chain`。
+        TaskKind::Template => Vec::new(),
         TaskKind::Expert | TaskKind::Team | TaskKind::Lighthouse => {
-            let (expert_id, expert_name) = default_expert(kind, ids.attempt());
+            let (expert_id, expert_name) =
+                expert.unwrap_or_else(|| default_expert(kind, ids.attempt()));
             let expert_type = if kind == TaskKind::Team { "team" } else { "agent" };
             vec![json!({
                 "eventCode": "expert_actual_use",
@@ -614,6 +621,72 @@ pub fn skill_share_chain(ids: &EventIds, share_code: &str) -> Vec<Value> {
     ]
 }
 
+/// 模板任务（`template_5`）的事件组：**四帧一组**，`id` 是服务端给的场景 id。
+///
+/// 三条不可改的约定（参考实现 `_template_events:1080`）：
+///
+/// 1. **四帧才是一组**：单帧事件不推进服务端计数，所以 [`desktop`] 对
+///    [`TaskKind::Template`] 返回空；调用方必须先 `GET` 到真实场景 id（`wb-campaign`
+///    的 `template_cases`），再调本函数。
+/// 2. **`id` 用场景 id**：上游按 `(eventCode, id)` 去重 ⇒ 同一场景重报不会多加分，
+///    正好防住「重试一轮就多刷几次进度」。四帧的 `eventCode` 各不相同，所以它们不会互相覆盖。
+/// 3. **一次尝试一条会话**：`conversationId` 取自 [`EventIds`]（掺了 attempt），
+///    `requestId` 与 `ext1` 也随尝试变化，跨轮不撞。
+pub fn template_chain(scene_id: &str, scene_name: &str, ids: &EventIds) -> Vec<Value> {
+    let cid = ids.conversation_id();
+    let rid = ids.request_id();
+    vec![
+        json!({
+            "eventCode": "agent_task_created",
+            "source": "CLOUD",
+            "name": "",
+            "mode": "craft",
+            "requestModelId": "default",
+            "action": scene_id,
+            "has_template": true,
+            "template_id": scene_id,
+            "template_name": scene_name,
+            "requestId": rid,
+            "conversationId": cid,
+        }),
+        json!({
+            "eventCode": "agent_task_created_with_template",
+            "templateId": scene_id,
+            "templateName": scene_name,
+            "template_id": scene_id,
+            "mode": "working",
+            "isCustomModel": true,
+            "id": scene_id,
+            "name": scene_name,
+            "requestId": rid,
+            "conversationId": cid,
+        }),
+        json!({
+            "eventCode": "template_used",
+            "template_id": scene_id,
+            "templateId": scene_id,
+            "templateName": scene_name,
+            "task_mode": "working",
+            "id": scene_id,
+            "name": scene_name,
+            "source": "growth-center",
+            "conversationId": cid,
+        }),
+        json!({
+            "eventCode": "playbook_prompt_send",
+            "ext1": uuid::Uuid::new_v4().to_string(),
+            "requestId": rid,
+            "id": scene_id,
+            "name": scene_name,
+            "type": "other",
+            "promptLength": 30,
+            "isOfficial": 1,
+            "source": "growth-center",
+            "conversationId": cid,
+        }),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // 小程序任务
 // ---------------------------------------------------------------------------
@@ -918,9 +991,11 @@ mod tests {
     const NOW: i64 = 1_763_000_000_000;
 
     /// 有事件链的桌面 kind 与它的首帧 `eventCode`、帧数。
-    const DESKTOP_CASES_TABLE: [(TaskKind, &str, usize); 13] = [
+    ///
+    /// `Template` 不在这张表里：单条模板事件不会推进 `template_5`，四帧组由
+    /// [`template_chain`] 负责（见 `template_group_needs_the_server_scene_id`）。
+    const DESKTOP_CASES_TABLE: [(TaskKind, &str, usize); 12] = [
         (TaskKind::Canvas, "wbx_design_canvas_task_create", 1),
-        (TaskKind::Template, "agent_task_created_with_template", 1),
         (TaskKind::Expert, "expert_actual_use", 1),
         (TaskKind::Team, "expert_actual_use", 1),
         (TaskKind::Lighthouse, "expert_actual_use", 1),
@@ -1019,19 +1094,17 @@ mod tests {
 
     #[test]
     fn attempt_scoped_ids_are_unique_and_pool_ids_rotate() {
-        // canvas / template 的 id 掺了 attempt ⇒ 跨轮永不重复。
+        // canvas 的 id 掺了 attempt ⇒ 跨轮永不重复。
         let user = user();
         let mut keys = std::collections::BTreeSet::new();
         for attempt in 0..64 {
             let ids = EventIds::desktop(NOW, attempt);
-            for kind in [TaskKind::Canvas, TaskKind::Template] {
-                for event in desktop(kind, &user, &ids) {
-                    let key = idempotency_key(&event).expect("event has an id");
-                    keys.insert(key);
-                }
+            for event in desktop(TaskKind::Canvas, &user, &ids) {
+                let key = idempotency_key(&event).expect("event has an id");
+                keys.insert(key);
             }
         }
-        assert_eq!(keys.len(), 64 * 2, "attempt-scoped ids must never repeat");
+        assert_eq!(keys.len(), 64, "attempt-scoped ids must never repeat");
 
         // 专家 / 团队用的是上游认识的固定 id 池（18 / 8 条），所以 id 只能保证在池子的一轮内
         // 互不相同。超出池子后重复是**上游契约**导致的：台账在该任务点亮后就该停手，
@@ -1272,13 +1345,84 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_prefers_the_declared_id() {
-        let event = desktop(TaskKind::Template, &user(), &EventIds::desktop(NOW, 7));
+    fn fixed_expert_tasks_use_the_catalog_expert_not_a_pool_rotation() {
+        // `expert_use_maidehao` / `Expert_lighthouse` 的判据认固定专家：按 attempt 轮转
+        // 池子会稳定地发出别人，任务永远点不亮。
+        let user = user();
+        let (id, name) = ("ex_GDl31WahyIH0", "中国电商运营专家");
+        for attempt in 0..4 {
+            let ids = EventIds::desktop(NOW, attempt);
+            let events = desktop_for_task(TaskKind::Expert, &user, &ids, Some((id, name)));
+            assert_eq!(events[0]["id"], id, "attempt={attempt}");
+            assert_eq!(events[0]["name"], name);
+            assert_eq!(events[0]["expertTitle"], name);
+        }
+        // 不给固定专家时仍按 attempt 轮转（普通 expert / team 的语义不变）。
+        let rotated = desktop_for_task(TaskKind::Expert, &user, &EventIds::desktop(NOW, 3), None);
+        assert_eq!(rotated[0]["id"], task_catalog::expert_at(3).0);
+
+        // 覆盖只对专家类生效：套到 canvas 上不许改事件形状。
+        let canvas = desktop_for_task(
+            TaskKind::Canvas,
+            &user,
+            &EventIds::desktop(NOW, 0),
+            Some((id, name)),
+        );
+        assert_eq!(canvas[0]["eventCode"], "wbx_design_canvas_task_create");
+    }
+
+    #[test]
+    fn template_group_needs_the_server_scene_id() {
+        let ids = EventIds::desktop(NOW, 0);
+        // 单帧不推进 `template_5`：宁可不发，也不发一串注定无效的事件。
+        assert!(desktop(TaskKind::Template, &user(), &ids).is_empty());
+
+        let events = template_chain("scene-8", "数据分析", &ids);
+        assert_eq!(events.len(), 4);
+        let codes: Vec<&str> = events
+            .iter()
+            .filter_map(|event| event["eventCode"].as_str())
+            .collect();
         assert_eq!(
-            idempotency_key(&event[0]),
+            codes,
+            [
+                "agent_task_created",
+                "agent_task_created_with_template",
+                "template_used",
+                "playbook_prompt_send"
+            ]
+        );
+        // 四帧共用一条会话（同一次尝试），id 固定为场景 id ⇒ 上游去重不会多加分。
+        for event in &events {
+            assert_eq!(event["conversationId"], ids.conversation_id());
+        }
+        for event in &events[..3] {
+            assert_eq!(event["template_id"], "scene-8");
+        }
+        assert_eq!(events[3]["id"], "scene-8");
+        // 去重键是 `(eventCode, id)`：第一帧照参考实现**不带 `id`**（只有 `action`），
+        // 所以它没有去重键，剩三帧的 `id` 都是场景 id 但 `eventCode` 各异 ⇒ 键互不相同。
+        assert!(events[0].get("id").is_none());
+        let unique: std::collections::BTreeSet<(String, String)> = events
+            .iter()
+            .filter_map(|event| idempotency_key(event))
+            .collect();
+        assert_eq!(unique.len(), 3, "三帧带 id 的事件键互不相同");
+
+        // 下一次尝试换会话（`ext1` 也跟着换），场景 id 不变。
+        let next = template_chain("scene-8", "数据分析", &EventIds::desktop(NOW, 1));
+        assert_ne!(next[0]["conversationId"], events[0]["conversationId"]);
+        assert_ne!(next[3]["ext1"], events[3]["ext1"]);
+    }
+
+    #[test]
+    fn idempotency_key_prefers_the_declared_id() {
+        let template = template_chain("scene-4", "深度研究", &EventIds::desktop(NOW, 7));
+        assert_eq!(
+            idempotency_key(&template[1]),
             Some((
                 "agent_task_created_with_template".to_string(),
-                "7".to_string()
+                "scene-4".to_string()
             ))
         );
         assert_eq!(
@@ -1296,7 +1440,6 @@ mod tests {
         let mut events = Vec::new();
         for kind in [
             TaskKind::Canvas,
-            TaskKind::Template,
             TaskKind::Expert,
             TaskKind::Team,
             TaskKind::Lighthouse,
@@ -1313,6 +1456,7 @@ mod tests {
             events.extend(desktop(kind, &user, &ids));
         }
         events.extend(skill_share_chain(&ids, "share-abc"));
+        events.extend(template_chain("scene-1", "name", &ids));
         events.extend(campaign_expert(&EventIds::campaign(NOW), "ex_1", "name"));
         events.extend(campaign_skill(&EventIds::campaign(NOW), "skill-1", "name"));
         events.push(campaign_chat(&EventIds::campaign(NOW)));

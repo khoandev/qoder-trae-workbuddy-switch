@@ -26,11 +26,13 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+use crate::modules::account;
 use crate::modules::at_rest::{decrypt_field, seal_field};
 use crate::modules::backoff::EgressKey;
 use crate::modules::config::{
     atomic_write, direct_client, egress_key_file, egress_slots_file, http_client_builder, now_ms,
 };
+use crate::modules::region::Region;
 use crate::modules::runtime_log::{warn, REDACTED};
 
 /// 槽 id 前缀（与 `backoff::EgressKey::slot` 的字符集约定一致）。
@@ -84,6 +86,82 @@ impl EgressScheme {
 }
 
 // ---------------------------------------------------------------------------
+// 出口情报（住宅 / 机房、国家、ISP）
+// ---------------------------------------------------------------------------
+
+/// 一次出口探测的结论。**每一个字段都可能为空**，空 = 不知道，绝不猜。
+///
+/// 来源（参考实现 `wb_ipintel.py`）：出口 IP 由槽自己访问 `api.ipify.org` 得到，
+/// 国家 / 类型 / ISP 由 `ip-api.com`（`lang=zh-CN`）直连查得。查询必须**直连**：
+/// 经槽走会被它自己的出口回答，也查不出「这条槽到底从哪出去」。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SlotIntel {
+    pub exit_ip: String,
+    /// 国家名（中文，展示用）。
+    pub country: String,
+    /// ISO 国家码（大写，按国家分组用）。
+    pub country_code: String,
+    /// `residential` / `datacenter`；空 = `hosting` 字段没给，不知道。
+    pub ip_type: String,
+    pub isp: String,
+    pub asn: String,
+    /// 探测时刻；`0` = 从未探测。
+    pub probed_at: i64,
+}
+
+/// 空情报（查询没成 / 还没有出口 IP）。形状与成功的一致，调用方不需要分支。
+pub fn empty_intel() -> SlotIntel {
+    SlotIntel::default()
+}
+
+/// ip-api.com 的回复 → 槽要存的字段。任何不可用的形状一律返回空，**不猜**。
+///
+/// `hosting` 只是启发式（机房托管商宣告的网段），不是注册表事实；所以同时存 ASN/ISP
+/// 让操作者自己看。
+pub fn classify_intel(payload: &Value, exit_ip: &str, probed_at: i64) -> SlotIntel {
+    let mut intel = empty_intel();
+    intel.exit_ip = exit_ip.trim().to_string();
+    intel.probed_at = probed_at;
+    if payload.get("status").and_then(Value::as_str) != Some("success") {
+        return intel;
+    }
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    intel.country = text("country");
+    intel.country_code = text("countryCode").to_ascii_uppercase();
+    intel.ip_type = match payload.get("hosting").and_then(Value::as_bool) {
+        Some(true) => "datacenter".to_string(),
+        Some(false) => "residential".to_string(),
+        None => String::new(),
+    };
+    intel.isp = {
+        let isp = text("isp");
+        if isp.is_empty() {
+            text("org")
+        } else {
+            isp
+        }
+    };
+    intel.asn = text("as");
+    intel
+}
+
+/// 地址类型的展示名（`住宅` / `机房`）；未知 ⇒ 空串（不要给它编一个名字）。
+pub fn ip_type_label(ip_type: &str) -> &'static str {
+    match ip_type.trim().to_ascii_lowercase().as_str() {
+        "residential" => "住宅",
+        "datacenter" => "机房",
+        _ => "",
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 槽模型
 // ---------------------------------------------------------------------------
 
@@ -100,6 +178,8 @@ pub struct EgressSlot {
     /// 探测得到的地区提示（只用于展示与后续 geo；**不参与路由判定**）。
     region: Option<String>,
     enabled: bool,
+    /// 最近一次探测的出口情报（**不参与路由判定**，只用于展示与分组）。
+    intel: SlotIntel,
 }
 
 impl EgressSlot {
@@ -129,6 +209,11 @@ impl EgressSlot {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// 最近一次探测的出口情报（空字段 = 不知道）。
+    pub fn intel(&self) -> &SlotIntel {
+        &self.intel
     }
 
     /// 是否有凭据（**只回答有没有**，不返回内容）。
@@ -175,6 +260,13 @@ impl EgressSlot {
             "credential": self.credential,
             "region": self.region,
             "enabled": self.enabled,
+            "exit_ip": self.intel.exit_ip,
+            "country": self.intel.country,
+            "country_code": self.intel.country_code,
+            "ip_type": self.intel.ip_type,
+            "isp": self.intel.isp,
+            "asn": self.intel.asn,
+            "probed_at": self.intel.probed_at,
         })
     }
 
@@ -217,6 +309,24 @@ impl EgressSlot {
             .filter(|region| !region.is_empty())
             .map(str::to_string);
         let enabled = value.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+        // 情报是**纯展示**：缺字段 / 类型不对都只是「不知道」，不能让整条槽解析失败。
+        let intel_text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string()
+        };
+        let intel = SlotIntel {
+            exit_ip: intel_text("exit_ip"),
+            country: intel_text("country"),
+            country_code: intel_text("country_code"),
+            ip_type: intel_text("ip_type"),
+            isp: intel_text("isp"),
+            asn: intel_text("asn"),
+            probed_at: value.get("probed_at").and_then(Value::as_i64).unwrap_or(0),
+        };
         Ok(Self {
             id,
             label,
@@ -226,6 +336,7 @@ impl EgressSlot {
             credential,
             region,
             enabled,
+            intel,
         })
     }
 }
@@ -242,6 +353,7 @@ impl fmt::Debug for EgressSlot {
             .field("credential", &self.credential.as_ref().map(|_| REDACTED))
             .field("region", &self.region)
             .field("enabled", &self.enabled)
+            .field("intel", &self.intel)
             .finish()
     }
 }
@@ -415,6 +527,14 @@ pub fn seal_credential(username: &str, password: &str, key: &[u8; 32]) -> Result
     seal_field(&plaintext, key).map_err(|_| "egress credential: seal failed".to_string())
 }
 
+/// `SlotDraft` 里的明文凭据 → 密文信封；没给凭据 ⇒ `None`（不是空信封）。
+fn seal_draft_credential(draft: &SlotDraft, key: &[u8; 32]) -> Result<Option<String>, String> {
+    match (&draft.username, &draft.password) {
+        (Some(user), Some(pass)) => seal_credential(user, pass, key).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// 解开信封 → `(用户名, 密码)`。失败**不推测**、不回落空凭据。
 pub fn open_credential(envelope: &str, key: &[u8; 32]) -> Result<(String, String), String> {
     let plaintext =
@@ -546,10 +666,7 @@ impl EgressTable {
         key: &[u8; 32],
     ) -> Result<String, String> {
         draft.validate()?;
-        let credential = match (&draft.username, &draft.password) {
-            (Some(user), Some(pass)) => Some(seal_credential(user, pass, key)?),
-            _ => None,
-        };
+        let credential = seal_draft_credential(&draft, key)?;
         let id = format!("{SLOT_PREFIX}{}", self.next_index);
         self.next_index = self.next_index.saturating_add(1);
         self.slots.push(EgressSlot {
@@ -565,8 +682,79 @@ impl EgressTable {
             credential,
             region: draft.region,
             enabled: true,
+            intel: empty_intel(),
         });
         Ok(id)
+    }
+
+    /// 改槽定义（**id、启用状态、探测情报、既有凭据在未给新凭据时都保留**）。
+    ///
+    /// 为什么凭据「不给就保留」：改一个代理地址不该要求用户重新输入密码 —— 拿不到密码
+    /// 就只能清空凭据，那等于把一条能用的槽改坏。要给新凭据就同时给用户名 + 密码。
+    pub fn update(&mut self, id: &str, draft: SlotDraft) -> Result<(), String> {
+        let key = install_key()?;
+        self.update_with_key(id, draft, &key)
+    }
+
+    /// 同 [`EgressTable::update`]，密钥由调用方给（测试用，不碰主目录）。
+    pub fn update_with_key(
+        &mut self,
+        id: &str,
+        draft: SlotDraft,
+        key: &[u8; 32],
+    ) -> Result<(), String> {
+        draft.validate()?;
+        let new_credential = seal_draft_credential(&draft, key)?;
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.id() == id)
+            .ok_or_else(|| format!("egress slot '{id}' not found"))?;
+        slot.label = if draft.label.trim().is_empty() {
+            format!("{}:{}", draft.host.trim(), draft.port)
+        } else {
+            draft.label.trim().to_string()
+        };
+        slot.scheme = draft.scheme;
+        slot.host = draft.host.trim().to_string();
+        slot.port = draft.port;
+        slot.region = draft.region;
+        if new_credential.is_some() {
+            slot.credential = new_credential;
+        }
+        Ok(())
+    }
+
+    /// 写入一次探测结果。
+    ///
+    /// **查询失败不抹掉旧情报**：`ip-api.com` 被墙 / 限速是常事，它一抖就清空国家，
+    /// 面板会从「美国 住宅」变成「未知」并把操作者的分组依据弄丢。只有「这次拿到了
+    /// 出口 IP」时才覆盖出口，且只覆盖**非空**字段（参考实现 `intel_ok` 的同一判据）。
+    pub fn set_intel(&mut self, id: &str, intel: &SlotIntel) -> Result<(), String> {
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.id() == id)
+            .ok_or_else(|| format!("egress slot '{id}' not found"))?;
+        let fresh_geo = !intel.country.is_empty()
+            || !intel.country_code.is_empty()
+            || !intel.isp.is_empty()
+            || !intel.asn.is_empty()
+            || !intel.ip_type.is_empty();
+        if !intel.exit_ip.is_empty() {
+            slot.intel.exit_ip = intel.exit_ip.clone();
+        }
+        if fresh_geo {
+            slot.intel.country = intel.country.clone();
+            slot.intel.country_code = intel.country_code.clone();
+            slot.intel.ip_type = intel.ip_type.clone();
+            slot.intel.isp = intel.isp.clone();
+            slot.intel.asn = intel.asn.clone();
+        }
+        if intel.probed_at > 0 {
+            slot.intel.probed_at = intel.probed_at;
+        }
+        Ok(())
     }
 
     /// 启用/禁用（**保留槽定义**：用户数据不静默删除）。
@@ -667,6 +855,163 @@ pub fn resolve(account: &Value, table: &EgressTable) -> Resolution {
 pub fn resolve_account(account: &Value) -> Resolution {
     resolve(account, &EgressTable::load())
 }
+
+/// 按槽 id 解析（**不看 enabled**：探测 / 预览一条停用的槽是合法操作）。
+pub fn resolve_slot(id: &str) -> Result<Resolution, String> {
+    let table = EgressTable::load();
+    let slot = table
+        .get(id)
+        .ok_or_else(|| format!("egress slot '{id}' not found"))?
+        .clone();
+    Ok(Resolution {
+        key: EgressKey::slot(&slot.id)?,
+        slot: Some(slot),
+    })
+}
+
+/// 绑在某个槽上的账号 id（**扫两个 region**；用于「删槽前先看谁在用」）。
+///
+/// 只返回 id，不返回账号内容：调用点是确认弹窗，多带一个 token 就多一处泄露面。
+pub fn bound_accounts(slot_id: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for region in [Region::Cn, Region::Global] {
+        for account in account::load_accounts_for(region) {
+            if bound_slot_id(&account) != Some(slot_id) {
+                continue;
+            }
+            let id = account
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| account.get("uid").and_then(Value::as_str))
+                .unwrap_or("")
+                .trim();
+            if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+// ---------------------------------------------------------------------------
+// 出口探测（ipify + ip-api）
+// ---------------------------------------------------------------------------
+
+/// 取「这条槽的出口 IP」的地址（**必须经槽**访问）。
+pub const EXIT_IP_PROBE_URL: &str = "https://api.ipify.org";
+/// 国家 / 类型 / ISP 的查询入口（**必须直连**，不能经被探测的槽）。
+pub const GEO_LOOKUP_URL: &str = "http://ip-api.com/json";
+/// 探测超时：ipify 12s、地理查询 8s（参考实现 `probe_proxy_exit` / `LOOKUP_TIMEOUT`）。
+pub const EXIT_IP_TIMEOUT_SECS: u64 = 12;
+pub const GEO_LOOKUP_TIMEOUT_SECS: u64 = 8;
+
+/// 探测一条槽：先经它取出口 IP，再**直连**查这个 IP 的国家与类型。
+///
+/// 两步两种结果：`Err` 只表示「经这条槽发不出请求」（槽坏了）；地理查询失败返回
+/// [`empty_intel`] 形状（只有 `exit_ip` / `probed_at`），因为一条能跑流量的槽不该被
+/// 一个第三方查询的抖动判死。
+pub async fn probe_slot(id: &str) -> Result<SlotIntel, String> {
+    let resolution = resolve_slot(id)?;
+    probe_resolution(&resolution).await
+}
+
+/// 同 [`probe_slot`]，但直接对着一次解析结果探测（网关 / 命令层复用）。
+pub async fn probe_resolution(resolution: &Resolution) -> Result<SlotIntel, String> {
+    let label = resolution.as_key().to_string();
+    let client = client_for(resolution).map_err(|error| format!("出口 {label}: {error}"))?;
+    let response = client
+        .get(EXIT_IP_PROBE_URL)
+        .timeout(std::time::Duration::from_secs(EXIT_IP_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|error| {
+            // 错误串可能带代理 URL（含凭据）：只留分类，不留原文。
+            let cause = if error.is_timeout() {
+                "超时"
+            } else if error.is_connect() {
+                "连接失败"
+            } else {
+                "请求失败"
+            };
+            format!("出口 {label}: 取不到出口 IP（{cause}）")
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "出口 {label}: 取不到出口 IP（HTTP {}）",
+            response.status().as_u16()
+        ));
+    }
+    let exit_ip = response.text().await.unwrap_or_default().trim().to_string();
+    if exit_ip.is_empty() {
+        return Err(format!("出口 {label}: 取不到出口 IP（空响应）"));
+    }
+    let mut intel = lookup_intel(&exit_ip).await;
+    intel.exit_ip = exit_ip;
+    intel.probed_at = now_ms();
+    Ok(intel)
+}
+
+/// 直连查询一个 IP 的国家 / 类型 / ISP。**任何失败都返回空字段**，不 panic、不重试。
+pub async fn lookup_intel(exit_ip: &str) -> SlotIntel {
+    let address = exit_ip.trim();
+    if address.is_empty() {
+        return empty_intel();
+    }
+    let url = format!(
+        "{GEO_LOOKUP_URL}/{}?lang=zh-CN&fields=status,message,country,countryCode,isp,org,as,hosting",
+        urlencode(address)
+    );
+    let Ok(response) = direct_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(GEO_LOOKUP_TIMEOUT_SECS))
+        .send()
+        .await
+    else {
+        return empty_intel();
+    };
+    let Ok(payload) = response.json::<Value>().await else {
+        return empty_intel();
+    };
+    classify_intel(&payload, address, 0)
+}
+
+/// 只保留 URL 安全字符（IP 字面量只会用到字母、数字、`.`、`:`），避免拼出第二个查询串。
+fn urlencode(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':' | '-'))
+        .collect()
+}
+
+/// 探测 + 落盘：命令层一行调用。返回合并后的情报（查询失败时是旧值 + 新出口 IP）。
+pub fn apply_intel(id: &str, intel: &SlotIntel) -> Result<SlotIntel, String> {
+    let mut table = EgressTable::load();
+    table.set_intel(id, intel)?;
+    let merged = table
+        .get(id)
+        .map(|slot| slot.intel().clone())
+        .unwrap_or_else(empty_intel);
+    table.save()?;
+    Ok(merged)
+}
+
+/// 账号是否打开了**出口级**瞬时失败退避（`automation.egress_backoff`）。
+///
+/// 缺省关：关着的时候请求路径与改造前逐字一致（不读槽表、不碰熔断表）。
+pub fn backoff_enabled(account: &Value) -> bool {
+    account
+        .get("automation")
+        .and_then(|automation| automation.get("egress_backoff"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// 进程级出口熔断器（纯内存，重启即归零）。
+///
+/// 为什么是**进程级**而不是按账号：熔断的对象是「这条出口」，同一出口上的多个账号共享
+/// 一次抖动，正是不该让每个账号各领一次 30 分钟冷却的原因
+/// （`docs/specs/WB-AUTOMATION-ARCH.md` §7.2）。
+pub static BREAKER: std::sync::LazyLock<crate::modules::backoff::EgressBreaker> =
+    std::sync::LazyLock::new(crate::modules::backoff::EgressBreaker::with_defaults);
 
 // ---------------------------------------------------------------------------
 // 客户端缓存（按槽）
@@ -1130,6 +1475,153 @@ mod tests {
         // 坏 JSON ⇒ 空表（= 全部直连），不 panic。
         std::fs::write(&path, "{not json").expect("write");
         assert!(EgressTable::load_from(&path).slots().is_empty());
+    }
+
+    #[test]
+    fn update_keeps_the_credential_enabled_flag_and_intel() {
+        let (mut table, id) = table_with(
+            SlotDraft::new("home", EgressScheme::Socks5, "10.0.0.2", 1080).with_auth("alice", "pw"),
+        );
+        let envelope_before = table.get(&id).expect("slot").to_value();
+        let credential_before = envelope_before["credential"].clone();
+        table
+            .set_intel(
+                &id,
+                &SlotIntel {
+                    exit_ip: "1.2.3.4".into(),
+                    country: "美国".into(),
+                    country_code: "US".into(),
+                    ip_type: "residential".into(),
+                    isp: "Comcast".into(),
+                    asn: "AS7922".into(),
+                    probed_at: 1_700_000_000_000,
+                },
+            )
+            .expect("set intel");
+        table.set_enabled(&id, false).expect("disable");
+
+        // 只换地址、不给凭据：凭据 / 启用状态 / 情报都必须原样保留。
+        table
+            .update_with_key(
+                &id,
+                SlotDraft::new("new label", EgressScheme::Http, "10.0.0.9", 8080),
+                &key(),
+            )
+            .expect("update");
+        let slot = table.get(&id).expect("slot");
+        assert_eq!(slot.host(), "10.0.0.9");
+        assert_eq!(slot.port(), 8080);
+        assert_eq!(slot.scheme(), EgressScheme::Http);
+        assert_eq!(slot.label(), "new label");
+        assert!(!slot.enabled(), "更新定义不许顺手把槽打开");
+        assert_eq!(slot.to_value()["credential"], credential_before);
+        assert_eq!(slot.intel().country, "美国");
+        assert_eq!(slot.intel().country_code, "US");
+
+        // 给了新凭据才换。
+        table
+            .update_with_key(
+                &id,
+                SlotDraft::new("home", EgressScheme::Http, "10.0.0.9", 8080)
+                    .with_auth("bob", "pw2"),
+                &key(),
+            )
+            .expect("update");
+        let envelope = table.get(&id).expect("slot").to_value();
+        assert_ne!(envelope["credential"], credential_before);
+        assert!(table
+            .update_with_key(
+                "slot-99",
+                SlotDraft::new("x", EgressScheme::Http, "h", 1),
+                &key()
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn intel_survives_a_failed_lookup_and_round_trips() {
+        let (mut table, id) = table_with(SlotDraft::new("home", EgressScheme::Http, "h", 80));
+        let good = SlotIntel {
+            exit_ip: "1.2.3.4".into(),
+            country: "美国".into(),
+            country_code: "US".into(),
+            ip_type: "datacenter".into(),
+            isp: "ISP".into(),
+            asn: "AS1".into(),
+            probed_at: 5,
+        };
+        table.set_intel(&id, &good).expect("set intel");
+
+        // 地理查询失败（全空）：只更新出口 IP / 时间，旧国家不能丢。
+        let degraded = SlotIntel {
+            exit_ip: "5.6.7.8".into(),
+            probed_at: 6,
+            ..SlotIntel::default()
+        };
+        table.set_intel(&id, &degraded).expect("set intel");
+        let intel = table.get(&id).expect("slot").intel().clone();
+        assert_eq!(intel.exit_ip, "5.6.7.8");
+        assert_eq!(intel.country, "美国");
+        assert_eq!(intel.country_code, "US");
+        assert_eq!(intel.probed_at, 6);
+
+        // 落盘再读回：情报是展示字段，缺字段也只是「不知道」。
+        let dir = TempDir::new("intel");
+        let path = dir.0.join("egress_slots.json");
+        table.save_to(&path).expect("save");
+        let reloaded = EgressTable::load_from(&path);
+        assert_eq!(reloaded.get(&id).expect("slot").intel(), &intel);
+
+        // 老文件没有情报字段时整条槽仍然可用（不能因为「不知道」被丢）。
+        let legacy = json!({"version": 1, "next_index": 2,
+            "slots": [{"id": "slot-1", "scheme": "http", "host": "h", "port": 80}]});
+        let table = EgressTable::from_value(&legacy);
+        assert_eq!(table.slots().len(), 1);
+        assert_eq!(table.get("slot-1").expect("slot").intel(), &empty_intel());
+    }
+
+    #[test]
+    fn classify_intel_never_guesses() {
+        // 非 success / 缺 hosting ⇒ 该字段空，而不是猜成住宅。
+        assert_eq!(
+            classify_intel(&json!({"status": "fail"}), "1.2.3.4", 9),
+            SlotIntel {
+                exit_ip: "1.2.3.4".into(),
+                probed_at: 9,
+                ..SlotIntel::default()
+            }
+        );
+        let intel = classify_intel(
+            &json!({
+                "status": "success",
+                "country": "美国",
+                "countryCode": "us",
+                "isp": "",
+                "org": "Example Org",
+                "as": "AS7922 Comcast",
+                "hosting": true
+            }),
+            " 1.2.3.4 ",
+            9,
+        );
+        assert_eq!(intel.exit_ip, "1.2.3.4");
+        assert_eq!(intel.country_code, "US");
+        assert_eq!(intel.isp, "Example Org", "isp 缺失时回落 org");
+        assert_eq!(intel.ip_type, "datacenter");
+        assert_eq!(intel.asn, "AS7922 Comcast");
+        assert_eq!(intel.probed_at, 9);
+
+        // hosting 缺席 ⇒ 类型未知（不猜住宅）。
+        let unknown = classify_intel(&json!({"status": "success"}), "1.1.1.1", 1);
+        assert_eq!(unknown.ip_type, "");
+
+        assert_eq!(ip_type_label("residential"), "住宅");
+        assert_eq!(ip_type_label("DATACENTER"), "机房");
+        assert_eq!(ip_type_label(""), "");
+        assert_eq!(ip_type_label("whatever"), "");
+
+        // IP 拼接只保留安全字符：不许拼出第二个查询参数。
+        assert_eq!(urlencode("1.2.3.4?a=b&x"), "1.2.3.4abx");
     }
 
     #[test]

@@ -391,8 +391,17 @@ GET  {chat_base}/v2/activity/growth/tasks
   按槽缓存且改 URL 换客户端、凭据打码（IPv6 也带方括号、URL 里不带凭据）。
 - **登录（扫码 / OAuth）不走槽**：那一刻还没有账号记录，也就没有 `automation.egress_slot`
   可读；要覆盖登录流量必须先选槽、后登录，属 UI 侧顺序问题，本期不做。
-- **尚未落地**：AccountsPage 的槽管理与绑定 UI、§7.3 的出口 IP 探测（`region` 字段目前
-  只用于展示，不参与路由判定）。
+- **出口情报（已落地）**：槽表新增 `exit_ip` / `country` / `country_code` / `ip_type`
+  （`residential|datacenter`，空 = `hosting` 未给）/ `isp` / `asn` / `probed_at`。
+  `egress::probe_slot(id)` 经槽访问 `api.ipify.org` 取出口 IP，再**直连** `ip-api.com`
+  （`lang=zh-CN`）查地理；`apply_intel` 落盘。规则与参考实现 `wb_ipintel.py` 一致：
+  地理查询失败只更新出口 IP、**不抹掉**上次成功的地理字段；`hosting` 缺席 ⇒ 类型空，
+  不猜住宅。情报**不参与路由判定**。
+- **出口退避（已接线）**：`task_io::send` 在 `automation.egress_backoff=true` 时先问
+  `egress::BREAKER`（`Defer` / `Waiting` ⇒ `status=0` + `code=-4`），请求回来后按
+  `task_io::failure_class` 记账：只有 `407` 计 hard，`429` 计 rate_limit，
+  `5xx` / 连接失败计 transient，**业务 4xx 不进熔断**。开关关闭时该路径与改造前逐字一致。
+- **尚未落地**：AccountsPage 的槽管理与绑定 UI、命令层的 `egress_slot_probe` 入口。
 
 ### 7.3 地区面板（`client_geo`）
 
@@ -407,6 +416,10 @@ GET  {chat_base}/v2/activity/growth/tasks
   `desktop`（浏览器形态 JSON）、`cli`（上游刷新 / 目录）、`mp`（微信小程序）、
   `campaign_portal`（活动 web 门户）、`chat`（对话 SSE）。表是**有序**的
   `Vec<(name, value)>`，模块外只能拿 `to_map()`，不许再各自拼字面量。
+- **`mp` 的两个变体也收在表里**：`mp_task()`（调 growth 任务接口：
+  `X-Client-Platform: miniprogram` + 小程序 UA）与 `mp_report()`（`/v2/report` 上报：
+  `X-Client-Product` / `X-Client-Version` / `X-Client-Platform: mp-weixin` / `X-Platform`）。
+  两者形状不同，不能合并；`X-Client-Version` 与事件信封的 `MP_IDE_VERSION` 同源。
 - **UA / 版本只有一处**：桌面形态用 `config::DEFAULT_HTTP_USER_AGENT`（官网套餐页捕获的
   那条 Chrome UA），CLI 形态用 `outbound_headers::CLI_USER_AGENT`，chat 形态由
   `identity::chat_user_agent(region, version, cli)` 构造。唯一允许写死的是

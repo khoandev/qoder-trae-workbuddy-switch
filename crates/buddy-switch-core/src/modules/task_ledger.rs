@@ -46,6 +46,23 @@ pub const LEDGER_FILE: &str = "wb_automation_ledger.json";
 
 const SCHEMA_VERSION: u32 = 1;
 
+/// 台账键里的账号标识：**内部 id**（不是 UID）。
+///
+/// 为什么不用 UID：台账会进诊断包与账号页，而 spec §8 的红线是「错误串/台账里只留
+/// `account_id`」。老记录没有 `id` 字段时回落 UID —— 宁可这一天的键与新版不同（最多重跑
+/// 一天），也不能让键变成空串把所有账号挤进同一格。
+pub fn ledger_account_id(account: &serde_json::Value) -> Option<String> {
+    let read = |key: &str| {
+        account
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    read("id").or_else(|| read("uid"))
+}
+
 /// 台账的「一天一格」键：`{product}/{region}/{account_id}/{feature}/{date}`。
 ///
 /// 五个分量都是**必有**的：少了 `feature` 会让「成长任务」与「运营活动」共享一次
@@ -329,6 +346,23 @@ impl TaskLedger {
         })
     }
 
+    /// 记一条**不算失败**的错误：只更新 `last_error`，不动 `attempts`。
+    ///
+    /// 用于「上游说还没到」这类业务回答（`400 task not completed`）：要留痕（账号页 /
+    /// 诊断包能看到），但不能烧当天的 [`MAX_ATTEMPTS_PER_DAY`] 预算 —— 否则三次「还没完成」
+    /// 就把一个真任务停一整天。
+    pub fn note_error(
+        &self,
+        key: &TaskDayKey,
+        message: &str,
+        at_ms: i64,
+    ) -> Result<TaskDayEntry, String> {
+        let sanitized = sanitize_error(message);
+        self.mutate(key, at_ms, |entry| {
+            entry.last_error = sanitized.clone();
+        })
+    }
+
     /// 记一次领奖成功（此后当天不再上报/领奖）。
     pub fn mark_claimed(
         &self,
@@ -481,6 +515,7 @@ pub fn sanitize_error(message: &str) -> String {
 mod tests {
     use super::*;
     use crate::modules::cst::cst_date_str;
+    use serde_json::json;
 
     // 2026-11-16 08:00 CST（固定值：让「当天 / 次日 / 30 天前」三条断言与跑测试的日期无关）。
     const NOW: i64 = 1_794_787_200_000;
@@ -527,6 +562,39 @@ mod tests {
 
         let entry = ledger.entry(&k).unwrap();
         assert_eq!(entry.credit_total(), 100);
+    }
+
+    #[test]
+    fn ledger_key_prefers_the_internal_account_id() {
+        // 台账进诊断包：键里只许出现内部 id（spec §8），UID 只是老记录的回落档。
+        assert_eq!(
+            ledger_account_id(&json!({"id": "acc-1", "uid": "u-secret"})).as_deref(),
+            Some("acc-1")
+        );
+        assert_eq!(
+            ledger_account_id(&json!({"uid": "u-secret"})).as_deref(),
+            Some("u-secret")
+        );
+        assert_eq!(ledger_account_id(&json!({"id": "  ", "uid": "u"})).as_deref(), Some("u"));
+        assert_eq!(ledger_account_id(&json!({})), None);
+    }
+
+    #[test]
+    fn note_error_leaves_the_attempt_budget_alone() {
+        // 「上游说还没到」要留痕，但不能烧掉当天预算。
+        let (_dir, ledger) = ledger();
+        let k = key("uid-1", "growth_tasks");
+        for _ in 0..(MAX_ATTEMPTS_PER_DAY + 2) {
+            ledger.note_error(&k, "400 task not completed", NOW).unwrap();
+        }
+        let entry = ledger.entry(&k).unwrap();
+        assert_eq!(entry.attempts, 0);
+        assert!(entry.last_error.contains("task not completed"));
+        // 真失败才推进 attempts，且错误串同样脱敏。
+        ledger.record_failure(&k, "HTTP 500 token=abc", NOW).unwrap();
+        let entry = ledger.entry(&k).unwrap();
+        assert_eq!(entry.attempts, 1);
+        assert!(!entry.last_error.contains("abc"));
     }
 
     #[test]

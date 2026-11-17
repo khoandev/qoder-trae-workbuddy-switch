@@ -24,21 +24,21 @@
 //! 本模块只负责「该接的都接上，且不浪费名额」。
 //!
 //! 与参考实现的一处**有意差异**：`run_growth_tasks` 把夜间任务整体排除（`black_cat` 另有
-//! `run_night_growth`）；这里允许「窗口内」接夜间任务、窗口外跳过
-//! （[`SkipReason::NightOutsideWindow`]）。窗口判据仍是 `cst::in_night_window`，没有第二份。
+//! `run_night_growth`）。这里同样把 `black_cat` 从成长链路里**整条摘掉**
+//! （[`SkipReason::NightOwnedByCat`]），由 `cat.rs` 的夜间调度独占；其它 `night_only`
+//! 任务仍在窗口外跳过（[`SkipReason::NightOutsideWindow`]），窗口判据只有 `cst::in_night_window` 一份。
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::modules::account::get_str;
 use crate::modules::cst::in_night_window;
 use crate::modules::outbound_headers;
 use crate::modules::region::{region_spec, Region};
 use crate::modules::task_catalog::{self, Gate, RawTask, ResolvedTask};
 use crate::modules::task_io::{TaskCall, TaskIo, WORKBUDDY_PRODUCT};
 use crate::modules::task_ledger::{
-    sanitize_error, TaskDayEntry, TaskDayKey, TaskLedger, MAX_ATTEMPTS_PER_DAY,
+    ledger_account_id, sanitize_error, TaskDayEntry, TaskDayKey, TaskLedger, MAX_ATTEMPTS_PER_DAY,
 };
 
 /// 台账里的 feature 名（`growth_tasks`，与 spec §3.3 的开关同名）。
@@ -57,6 +57,8 @@ pub const GAP_JITTER_PCT: u64 = 25;
 pub const MAX_ACCEPT_ROUNDS: usize = 2;
 /// 所有 single 任务与猫猫旅行的前置任务码。
 pub const FIRST_BUDDY: &str = "first_buddy";
+/// 夜间任务码：整条归 `cat.rs` 的 01:00 调度独占（参考实现另起 `run_night_growth`）。
+pub const BLACK_CAT: &str = "black_cat";
 
 // ---------------------------------------------------------------------------
 // 清单
@@ -258,6 +260,8 @@ pub enum SkipReason {
     PrerequisiteFirstBuddy,
     /// 目录不认识、也推不出事件链：不猜 kind，**不接**（接了也报不出有效事件）。
     UnknownCode,
+    /// `black_cat` 归 `cat.rs` 的夜间调度，成长链路不碰（重复上报就是重复事件）。
+    NightOwnedByCat,
 }
 
 impl SkipReason {
@@ -271,6 +275,7 @@ impl SkipReason {
             Self::NightOutsideWindow => "night_outside_window",
             Self::PrerequisiteFirstBuddy => "prerequisite_first_buddy",
             Self::UnknownCode => "unknown_code",
+            Self::NightOwnedByCat => "night_owned_by_cat",
         }
     }
 }
@@ -329,8 +334,12 @@ impl AcceptPlan {
 ///
 /// 三种判据，任一成立即视为就绪：
 /// 1. 台账里今天已经领过 `first_buddy`；
-/// 2. 清单里它有进度（`current >= target`）或状态已是 `accepted` / `claimed`；
+/// 2. 清单里它有进度（`current >= target`）；
 /// 3. **清单里根本没有它** —— 只把「清单里有、但还没成」当作未就绪。
+///
+/// `accept_status == accepted` **不算就绪**：接取只表示「这个任务可以做了」，上游对
+/// single 任务的前置判据是 `first_buddy` 的**完成**（`prerequisite not met: first_buddy`），
+/// 把「接到手」当成「做完了」会让每一轮都白接一批、白报一批。
 ///
 /// 第 3 条是有意的：清单只列「还能做的任务」，老账号不会一直带着 `first_buddy`。
 /// 若把「不在清单里」当成未就绪，这些账号会**永久**做不了 single 任务。
@@ -339,15 +348,23 @@ pub fn first_buddy_ready(tasks: &[GrowthTask], entry: &TaskDayEntry) -> bool {
         return true;
     }
     match tasks.iter().find(|task| task.code == FIRST_BUDDY) {
-        Some(task) => task.is_complete() || task.status.is_accepted(),
+        Some(task) => task.is_complete(),
         None => true,
     }
 }
 
 /// 从清单 + 当日台账算出「接什么、不接什么」。
 ///
-/// 判定顺序（先便宜、先硬的）：夜间窗口 → 需真人 → 台账（已领 / 已判真人 / 失败到顶）
-/// → 未知码 → auto 类 → 已接取 → `first_buddy` 前置 → 进批次。
+/// 判定顺序（**顺序本身是语义**，改之前先读这一段）：
+///
+/// 1. **已领奖 / 已完成**先出局 —— 这两类的后续动作是「领奖」，由 runner 直接看清单做，
+///    与接取、事件、`attempts` 预算都无关。把它们排进 accept 或 needs_human，等于让一个
+///    **已经做完**的任务在当日失败到顶时连奖励都拿不到。
+/// 2. **`black_cat` 一律出局**：它归 `cat.rs` 的 01:00 夜间调度，成长链路再报一次就是重复。
+/// 3. 夜间窗口 → 未知码 → 需真人 → 台账（已判真人 / 失败到顶）。
+/// 4. **auto 类**进 [`AcceptPlan::auto_first`]（无论 `accept_status`：上游明说 auto 不接受接取，
+///    `accepted` 在这里不代表任何东西）。
+/// 5. 已接取的 single → 跳过；`first_buddy` 未完成 → 跳过；其余进批次。
 pub fn plan_accept(tasks: &[GrowthTask], entry: &TaskDayEntry, now_ms: i64) -> AcceptPlan {
     let mut plan = AcceptPlan::default();
     let night_open = in_night_window(now_ms);
@@ -360,6 +377,31 @@ pub fn plan_accept(tasks: &[GrowthTask], entry: &TaskDayEntry, now_ms: i64) -> A
     let mut codes: Vec<String> = Vec::new();
     for task in order_for_run(tasks) {
         let code = task.code.as_str();
+        // 已完成 / 已领奖：本轮的接取与事件都不该碰它（runner 另有 claim 通道）。
+        if entry.claimed.contains_key(code) {
+            plan.skipped.push(Skipped::new(
+                code,
+                SkipReason::AlreadyClaimed,
+                "今天已经领过奖",
+            ));
+            continue;
+        }
+        if task.is_complete() {
+            plan.skipped.push(Skipped::new(
+                code,
+                SkipReason::AlreadyAccepted,
+                format!("已完成（{}/{}）", task.current, task.target),
+            ));
+            continue;
+        }
+        if code == BLACK_CAT {
+            plan.skipped.push(Skipped::new(
+                code,
+                SkipReason::NightOwnedByCat,
+                "夜猫子任务由 01:00 夜间调度独占（cat.rs）",
+            ));
+            continue;
+        }
         if task.spec.night_only && !night_open {
             plan.skipped.push(Skipped::new(
                 code,
@@ -368,18 +410,18 @@ pub fn plan_accept(tasks: &[GrowthTask], entry: &TaskDayEntry, now_ms: i64) -> A
             ));
             continue;
         }
+        if !task.spec.is_known() {
+            plan.skipped.push(Skipped::new(
+                code,
+                SkipReason::UnknownCode,
+                "目录不认识这个任务码：不猜 kind，也不占接取名额",
+            ));
+            continue;
+        }
         if task.spec.needs_human() {
             let reason = task.spec.needs_human_reason().unwrap_or("需要真人操作");
             plan.needs_human
                 .push(Skipped::new(code, SkipReason::NeedsHuman, reason));
-            continue;
-        }
-        if entry.claimed.contains_key(code) {
-            plan.skipped.push(Skipped::new(
-                code,
-                SkipReason::AlreadyClaimed,
-                "今天已经领过奖",
-            ));
             continue;
         }
         if let Some(reason) = entry.needs_human.get(code) {
@@ -395,34 +437,21 @@ pub fn plan_accept(tasks: &[GrowthTask], entry: &TaskDayEntry, now_ms: i64) -> A
             ));
             continue;
         }
-        if !task.spec.is_known() {
-            plan.skipped.push(Skipped::new(
-                code,
-                SkipReason::UnknownCode,
-                "目录不认识这个任务码：不猜 kind，也不占接取名额",
-            ));
-            continue;
-        }
-        // 已完成 / 已接取：auto 类也不该再排进事件链（那只会白发一串事件）。
-        if task.is_complete() || !task.needs_accept() {
-            plan.skipped.push(Skipped::new(
-                code,
-                SkipReason::AlreadyAccepted,
-                format!(
-                    "已完成（{}/{}，accept_status={}）",
-                    task.current,
-                    task.target,
-                    task.status.as_str()
-                ),
-            ));
-            continue;
-        }
+        // auto 类：不需要接取，只看「还没做完」；`accept_status` 在这里没有意义。
         if task.class.is_auto() {
             plan.auto_first.push(task.code.clone());
             plan.skipped.push(Skipped::new(
                 code,
                 SkipReason::AutoNoAccept,
                 "auto 类不需要接取（由事件链点亮）",
+            ));
+            continue;
+        }
+        if !task.needs_accept() {
+            plan.skipped.push(Skipped::new(
+                code,
+                SkipReason::AlreadyAccepted,
+                format!("accept_status={}", task.status.as_str()),
             ));
             continue;
         }
@@ -691,11 +720,13 @@ pub async fn run_accept_round(
         round.gate = Some(gate.as_str().to_string());
         return Ok(round);
     }
-    let uid = get_str(account, "uid").ok_or_else(|| "account has no uid".to_string())?;
+    // 台账键用**内部 id**（不是 UID）：台账会进诊断包，spec §8 只许留 account_id。
+    let account_id = ledger_account_id(account)
+        .ok_or_else(|| "account has no id or uid".to_string())?;
     let key = TaskDayKey::for_now(
         WORKBUDDY_PRODUCT,
         region.as_str(),
-        &uid,
+        &account_id,
         GROWTH_FEATURE,
         cfg.now_ms,
     )?;

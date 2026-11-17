@@ -10,6 +10,9 @@
 //!    这一层是「账号暂停 / 冷却 / 限速」的唯一落点，少调一次就等于风控设置对任务链失效。
 //! 3. **凭据不进日志**：[`TaskCall`] 刻意不实现 `Debug`（它持有账号 JSON），日志要用
 //!    [`call_label`]（URL 先过 `runtime_log::redact`）。
+//! 4. **出口熔断按出口计**（opt-in `automation.egress_backoff`）：准入之前先问
+//!    `egress::BREAKER`，`Defer` / `Waiting` 就直接返回 `status = 0` + [`EGRESS_DEFERRED_CODE`]；
+//!    请求回来后按 [`failure_class`] 记账 —— 业务 4xx **不**算出口失败（spec §7.2）。
 //!
 //! 与既有模块的关系：`cat.rs` / `travel.rs` / `activity.rs` 各自的 `*Io` trait 是**同一形态的
 //! 前身**（如 `CatIo`）。本文件不替换它们 —— 迁移期两套并存，等任务链全部搬完再收口
@@ -20,8 +23,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::modules::backoff::{Admission, FailureClass};
 use crate::modules::config::{authed_json_request_for, now_ms};
 use crate::modules::device_identity;
+use crate::modules::egress;
 use crate::modules::region::Region;
 use crate::modules::risk_control::{admit_platform_request, record_platform_response};
 use crate::modules::runtime_log::redact;
@@ -31,6 +36,29 @@ use crate::modules::runtime_log::redact;
 /// 与 `travel.rs` 的既有写法对齐（那边用 `code = -3` + 「风控准入拦截：…」文案），
 /// 调用方据此区分「上游说不行」和「本地没让发」。
 pub const ADMISSION_BLOCKED_CODE: i64 = -3;
+
+/// 出口熔断挡住本次请求的**哨兵码**：`status = 0`（没发出去）+ `code = -4`。
+///
+/// 与 [`ADMISSION_BLOCKED_CODE`] 分开：那是「账号这一轮别动」，这是「这条出口还在冷却」。
+/// 调用方据此决定是停账号本回合，还是只推迟这一条 feature。
+pub const EGRESS_DEFERRED_CODE: i64 = -4;
+
+/// 任务链的一次失败该怎么记到**出口**上（`None` = 这不是出口的锅，别记）。
+///
+/// 只有 407 计入熔断：任务链上的 400 / 401 / 403 / business `code != 0` 全是**正常业务态**
+/// （`400 task not completed`、`403 连登天数不足`、token 过期）—— 把它们记到出口头上，
+/// 三次「还没到」就会把整条出口熔断 30 分钟（spec §7.2）。
+pub fn failure_class(status: u16) -> Option<FailureClass> {
+    match status {
+        // 请求没发出去（连接失败 / 超时）：这一条出口此刻有问题，但只是「这一次」。
+        0 => Some(FailureClass::Transient),
+        // 代理认证失败：出口本身配错了，再发也是同一个结果。
+        407 => Some(FailureClass::Hard),
+        429 => Some(FailureClass::RateLimit),
+        500..=599 => Some(FailureClass::Transient),
+        _ => None,
+    }
+}
 
 /// 一次任务的 HTTP 结果：`(HTTP 状态码, 解析后的 JSON)`。
 ///
@@ -127,6 +155,37 @@ pub async fn send(
 ) -> TaskReply {
     let region_code = region.as_str();
     let uid = account.get("uid").and_then(Value::as_str).unwrap_or("");
+    // 出口熔断：**opt-in**（`automation.egress_backoff`）。关着时不读槽表、不碰熔断表，
+    // 这条路径与改造前逐字一致。
+    let egress_key = if egress::backoff_enabled(account) {
+        let resolution = egress::resolve_account(account);
+        match egress::BREAKER.admit(resolution.key(), now_ms().max(0) as u64) {
+            Admission::Allow | Admission::Probe => Some(resolution.key().clone()),
+            Admission::Defer { until_ms } => {
+                return (
+                    0,
+                    json!({
+                        "code": EGRESS_DEFERRED_CODE,
+                        "message": format!(
+                            "出口熔断中（{}）：到 {until_ms} 再试",
+                            resolution.as_key()
+                        ),
+                    }),
+                )
+            }
+            Admission::Waiting => {
+                return (
+                    0,
+                    json!({
+                        "code": EGRESS_DEFERRED_CODE,
+                        "message": format!("出口试探在飞（{}）：稍后再试", resolution.as_key()),
+                    }),
+                )
+            }
+        }
+    } else {
+        None
+    };
     // `_permit` 必须活到响应回来：并发与最小间隔是「持有期间」计数的。
     let _permit = match admit_platform_request(product, region_code, uid).await {
         Ok(permit) => permit,
@@ -150,6 +209,16 @@ pub async fn send(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if let Some(key) = &egress_key {
+        match failure_class(status) {
+            Some(class) => {
+                let _ = egress::BREAKER.record_failure(key, class, now_ms().max(0) as u64);
+            }
+            // 2xx / 业务 4xx：出口是通的（上游的答复就是证明），清掉失败史。
+            // 半开试探也在这里释放，否则其余请求会一直 `Waiting`。
+            None => egress::BREAKER.record_success(key),
+        }
+    }
     let _ = record_platform_response(product, region_code, uid, code, reason);
     (status, body)
 }
@@ -328,6 +397,38 @@ mod tests {
 
     fn account(uid: &str, token: &str) -> Value {
         json!({ "uid": uid, "access_token": token })
+    }
+
+    /// 出口熔断只认**出口级**失败：业务 4xx 与 2xx 都不能推进熔断。
+    #[test]
+    fn only_egress_level_failures_reach_the_breaker() {
+        assert_eq!(failure_class(0), Some(FailureClass::Transient));
+        assert_eq!(failure_class(407), Some(FailureClass::Hard));
+        assert_eq!(failure_class(429), Some(FailureClass::RateLimit));
+        assert_eq!(failure_class(502), Some(FailureClass::Transient));
+        assert_eq!(failure_class(503), Some(FailureClass::Transient));
+        // 任务链上这些全是正常业务态：`400 task not completed` / `403 连登天数不足` /
+        // token 过期 / 领奖已领过。记到出口上会把整条出口熔断。
+        for status in [200, 201, 400, 401, 403, 404, 409, 422] {
+            assert_eq!(failure_class(status), None, "status={status}");
+        }
+        // 只有 Hard 真的计数（`backoff` 的语义在这里再钉一次，避免有人改分类表）。
+        assert!(FailureClass::Hard.counts_toward_breaker());
+        assert!(!FailureClass::Transient.counts_toward_breaker());
+        assert!(!FailureClass::RateLimit.counts_toward_breaker());
+        assert_ne!(EGRESS_DEFERRED_CODE, ADMISSION_BLOCKED_CODE);
+    }
+
+    /// 默认关：一个没有 `automation.egress_backoff` 的账号不会被出口熔断挡住。
+    #[test]
+    fn egress_backoff_is_opt_in() {
+        assert!(!egress::backoff_enabled(&json!({"uid": "u1"})));
+        assert!(!egress::backoff_enabled(
+            &json!({"uid": "u1", "automation": {"egress_backoff": false}})
+        ));
+        assert!(egress::backoff_enabled(
+            &json!({"uid": "u1", "automation": {"egress_backoff": true}})
+        ));
     }
 
     #[test]

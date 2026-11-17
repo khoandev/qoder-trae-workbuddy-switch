@@ -223,6 +223,33 @@ pub fn mp(base: &str) -> HeaderSet {
     set
 }
 
+/// 小程序的**任务接口**头（清单 / 接取 / 领奖）：参考实现 `MP_HEADERS:38`。
+///
+/// 与 [`mp`] 的区别：`mp` 是「事件上报 / 页面请求」的形态（`origin` + `referer`），
+/// 这里是「小程序调 growth 接口」的形态（`X-Client-Platform: miniprogram`）。
+/// 两者不能合并：合并后要么给接口发多余的 `origin`，要么给页面漏掉小程序标记。
+pub fn mp_task() -> HeaderSet {
+    let mut set = HeaderSet::new();
+    set.push("X-Client-Platform", "miniprogram")
+        .push("User-Agent", MP_USER_AGENT);
+    set
+}
+
+/// 小程序的**事件上报**头（`/v2/report`）：参考实现 `MP_REPORT_HEADERS:43`。
+///
+/// `X-Client-Version` 取 [`crate::modules::task_event::MP_IDE_VERSION`]，与事件信封里的
+/// `ideVersion` 同源 —— 两处写死同一个版本号，迟早在一次升级里分叉。
+pub fn mp_report() -> HeaderSet {
+    let mut set = HeaderSet::new();
+    set.push("Content-Type", "application/json")
+        .push("Accept", "application/json")
+        .push("X-Client-Product", "workbuddy-mp")
+        .push("X-Client-Version", crate::modules::task_event::MP_IDE_VERSION)
+        .push("X-Client-Platform", "mp-weixin")
+        .push("X-Platform", "wechatmp");
+    set
+}
+
 /// 活动 web 门户形态：`x-client-platform: web` + `Origin` / `Referer`（头名小写）。
 ///
 /// `referer_path` 必须是**以 `/` 开头的路径**（如 [`GROWTH_CENTER_PATH`]）；
@@ -356,6 +383,33 @@ mod tests {
             campaign_portal(CN_BASE, "profile/growth-center").get("referer"),
             Some("https://www.workbuddy.cn/profile/growth-center")
         );
+    }
+
+    #[test]
+    fn mp_task_and_mp_report_wire_order_is_pinned() {
+        // 两张表都是「照参考实现逐字搬」：改顺序 / 改名就等于改线上形态。
+        assert_eq!(
+            mp_task().wire_snapshot(),
+            format!("X-Client-Platform: miniprogram\nUser-Agent: {MP_USER_AGENT}\n")
+        );
+        assert_eq!(
+            mp_report().wire_snapshot(),
+            format!(
+                "Content-Type: application/json\n\
+                 Accept: application/json\n\
+                 X-Client-Product: workbuddy-mp\n\
+                 X-Client-Version: {}\n\
+                 X-Client-Platform: mp-weixin\n\
+                 X-Platform: wechatmp\n",
+                crate::modules::task_event::MP_IDE_VERSION
+            )
+        );
+        // 上报头里的版本必须与事件信封同源（不许各自写一个 2.4.0）。
+        assert_eq!(
+            mp_report().get("X-Client-Version"),
+            Some(crate::modules::task_event::MP_IDE_VERSION)
+        );
+        assert_eq!(crate::modules::task_event::MP_IDE_VERSION, "2.4.0");
     }
 
     #[test]
