@@ -168,7 +168,9 @@ runner 里不许再出现任务码字面量、`target` 数字、专家 id。内�
 
 | 入口 | 覆盖 |
 |:--|:--|
-| `desktop(kind, user, ids)` | canvas / template / expert / team / lighthouse / skill / automation / playbook / skin / chat / glmchat / cat / library，以及 `RichMeow` 的 6 连对话 |
+| `desktop(kind, user, ids)` | canvas / expert / team / lighthouse / skill / automation / playbook / skin / chat / glmchat / cat / library，以及 `RichMeow` 的 6 连对话；`Template` 返回空（改走 `template_chain`） |
+| `desktop_for_task(kind, user, ids, expert)` | 同 `desktop`，但允许把目录钉死的专家写进 `expert_actual_use`（`expert == None` 时与 `desktop` 逐字相同） |
+| `template_chain(scene_id, scene_name, ids)` | `template_5` 的四帧事件组（`id` = 服务端场景 id） |
 | `skill_share_chain(ids, share_code)` | 两条 `skill_share_channel_action`；`share_code` 必须来自真实建渠道响应 |
 | `chat_chain(user, ids, model)` | 桌面 6 连成功对话（`agent_task_created` → … → `agent_task_completed`） |
 | `mp(code, ids, expert)` | 小程序单条事件，`kind` 从 `task_catalog::mp_spec` 取；未知码返回 `None` |
@@ -181,7 +183,9 @@ runner 里不许再出现任务码字面量、`target` 数字、专家 id。内�
 1. **纯函数**：不读时钟、不发请求。`now_ms` 与 `attempt` 由调用方给（`EventIds`），
    事件体因此可在测试里逐字断言。
 2. **id 每次尝试都不同**：`conversationId` / `requestId` / `messageId` 掺 `attempt`；
-   `wbx-canvas-*` 与 `template` 的 `id` 同样掺（参考实现只带毫秒，同毫秒两轮会撞键）。
+   `wbx-canvas-*` 的 `id` 同样掺（参考实现只带毫秒，同毫秒两轮会撞键）。**例外**：
+   `template_chain` 的 `id` 固定为**服务端场景 id** —— 上游按 `(eventCode, id)` 去重，
+   同一场景重报不该多加分；这条链里随尝试变化的是 `conversationId` / `requestId` / `ext1`。
 3. **池内 id 不越界**：专家 / 团队 id 只能来自 `EXPERT_POOL` / `TEAM_POOL`，按 attempt 轮转；
    超出池子后重复是上游契约，靠台账「点亮即停」而不是造一个假专家 id。
 4. **信封只有两份**：桌面（`machineId` / `sessionId` / `ideVersion` 由 `device_identity` 与
@@ -189,9 +193,9 @@ runner 里不许再出现任务码字面量、`target` 数字、专家 id。内�
 5. **不装凭证**：事件体与信封里没有 token / cookie / `Authorization` / 密钥字段，
    `events_never_carry_credential_fields` 逐字段扫描钉住。
 
-验证：`cargo test -p buddy-switch-core --lib modules::task_event`（15 条，含逐 kind 必填字段、
+验证：`cargo test -p buddy-switch-core --lib modules::task_event`（17 条，含逐 kind 必填字段、
 跨轮 id 唯一、id 池轮转、6 连对话、小程序 kind 映射与未知码、两份信封、活动四类判据、
-活动页面上下文、去重键、凭证扫描）。
+活动页面上下文、去重键、凭证扫描、固定专家覆盖、`template_5` 四帧组）。
 
 ### 3.6 成长任务引擎（`task_engine`：读 → 排序 → 接取）
 
@@ -211,14 +215,16 @@ GET  {chat_base}/v2/activity/growth/tasks
 1. **auto 类不接取**：上游对 `task_type == "auto"`（`first_buddy` 等）明确
    「task does not require acceptance」。它们只进 `AcceptPlan::auto_first`（事件链先跑），
    一批都不占 —— 把 auto 塞进 accept 只会换来一条失败结果。
-2. **`first_buddy` 是 single 与猫猫旅行的前置**：清单里有它而没完成（`current < target` 且
-   `accept_status == not_accepted`）时，single 一律不接（`prerequisite_first_buddy`），
-   `AcceptPlan::blocked_by` 置 `Some("first_buddy")`。**清单里没有它 = 视为就绪**：
-   老账号的清单不会一直带着它，把「不在清单」当未就绪会永久卡死所有 single 任务。
+2. **`first_buddy` 是 single 与猫猫旅行的前置**：清单里有它而**没完成**（`current < target`）
+   时，single 一律不接（`prerequisite_first_buddy`），`AcceptPlan::blocked_by` 置
+   `Some("first_buddy")`。**只认「已完成」或「台账已领奖」**：`accept_status == accepted`
+   不算就绪（接取不等于点亮，参考实现的 `accepted` 也不推进前置）。**清单里没有它 =
+   视为就绪**：老账号的清单不会一直带着它，把「不在清单」当未就绪会永久卡死所有 single 任务。
 3. **不猜、不白占**：目录不认识的码（`unknown_code`）、今天已领（`already_claimed`）、
    今天已判真人（`needs_human`）、当日失败到顶（`attempts_exhausted`）、已接取
-   （`already_accepted`）—— 都**不进批次**。夜间任务（`black_cat`）只在 CST 23:00–08:00
-   的窗口内才接，窗口外跳过。
+   （`already_accepted`）—— 都**不进批次**。`black_cat` 由 `cat.rs` 的夜间调度独占，
+   成长链路**任何时段都不接**（`night_owned_by_cat`）；其它 `night_only` 任务只在
+   CST 23:00–08:00 的窗口内接，窗口外跳过。
 4. **间隔取更严的那个**：`max(引擎 1s, 风控 min_account_gap_ms) + ±25% 抖动`，负抖动
    **不低于 1s**。风控关着时不采信它的 `min_account_gap_ms`（5s 是风控自己的缺省，
    开关关掉还照样 5s 等于开关没生效）。抖动是确定性的（同一种子同一结果），
@@ -230,10 +236,12 @@ GET  {chat_base}/v2/activity/growth/tasks
    **发了但响应里没提的码也算失败**（参考实现当年正是吞掉这些失败，才出现「接了一堆却
    一个都没点亮」）。错误文案过 `redact`，不把凭据写进台账。
 
-与参考实现的两处**有意差异**，理由都在上面：夜间任务「窗口内可接」（参考实现整体排除，
-交给 `run_night_growth`）、已完成的 auto 任务不再排进 `auto_first`（参考实现会照跑一遍事件）。
+与参考实现的**有意差异**，理由都在上面：`black_cat` 整条摘出成长链路（参考实现同样交给
+`run_night_growth`，但会先把它排进成长接取）、其它 `night_only` 任务「窗口内可接」（参考实现
+整体排除）、已完成的 auto 任务不再排进 `auto_first`（参考实现会照跑一遍事件）、
+`first_buddy` 已接取但未完成仍算未就绪（参考实现只比 `accept_status`）。
 
-验证：`cargo test -p buddy-switch-core --lib modules::task_engine_accept`（21 条，含清单字段
+验证：`cargo test -p buddy-switch-core --lib modules::task_engine_accept`（18 条，含清单字段
 优先级、无码行丢弃、auto 先序、`first_buddy` 前置、夜间窗口内外、需真人/已领/已接/未知码/
 失败到顶的跳过、20 条分批、间隔与抖动边界、接取结果三分类、错误脱敏、整轮流水线的
 「GET→POST→GET」「只重试一次」「不该发就不发」以及台账 `actions`/`attempts` 计数）。

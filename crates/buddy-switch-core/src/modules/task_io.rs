@@ -190,6 +190,15 @@ pub async fn send(
     let _permit = match admit_platform_request(product, region_code, uid).await {
         Ok(permit) => permit,
         Err(error) => {
+            // 请求根本没发出去：这次半开试探必须交回。按 `Transient` 归还只释放试探槽、
+            // 不推进熔断（出口本身没被证明坏），否则其余请求要白等 `PROBE_TIMEOUT_MS`。
+            if let Some(key) = &egress_key {
+                let _ = egress::BREAKER.record_failure(
+                    key,
+                    FailureClass::Transient,
+                    now_ms().max(0) as u64,
+                );
+            }
             return (
                 0,
                 json!({
