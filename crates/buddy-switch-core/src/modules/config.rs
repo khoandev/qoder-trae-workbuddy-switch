@@ -1435,7 +1435,7 @@ fn parse_json_body(text: &str) -> Value {
 
 /// 带 token 刷新重试的**已授权**请求，返回 `(HTTP 状态码, 解析后的 JSON)`。
 ///
-/// 与 [`http_request`] 的差异：**保留 HTTP 状态码**。growth / school / cat 这类接口需要
+/// 与 [`http_request`] 的差异：**保留 HTTP 状态码**。growth / cat 这类接口需要
 /// 区分「409 已领取」「403 天数不足」「400 无抽奖次数」等**正常态**——这些态要靠真实
 /// HTTP 状态判定，而 `http_request` 在失败时会把状态码折叠进 `code` 字段，无法可靠区分。
 ///
@@ -1452,7 +1452,7 @@ pub async fn authed_json_request_for(
 ) -> (u16, Value) {
     // 加密信封凭据短路：`build_auth_headers` 会把信封折成**空 Bearer**，
     // 发出去只会换回上游 401（以及整页 HTML）。这里直接给可读错误。
-    // 401 是刻意的：调用方（growth / school / cat）都按「非 2xx = 失败」处理，
+    // 401 是刻意的：调用方（growth / cat）都按「非 2xx = 失败」处理，
     // 并把 `message` 透出给用户；信封态**不是**可刷新状态，不该走下面的 401 刷新分支。
     if let Some(err) = crate::modules::account::envelope_token_error(account) {
         return (401, json!({"code": -2, "message": err}));

@@ -475,7 +475,6 @@ mod tests {
     #[test]
     fn no_ua_is_hardcoded_outside_this_module() {
         for (name, source) in [
-            ("school.rs", include_str!("school.rs")),
             ("activity.rs", include_str!("activity.rs")),
             ("cat.rs", include_str!("cat.rs")),
         ] {

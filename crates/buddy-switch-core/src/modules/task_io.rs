@@ -12,7 +12,7 @@
 //!    [`call_label`]（URL 先过 `runtime_log::redact`）。
 //!
 //! 与既有模块的关系：`cat.rs` / `travel.rs` / `activity.rs` 各自的 `*Io` trait 是**同一形态的
-//! 前身**（`CatIo` / `SchoolIo`）。本文件不替换它们 —— 迁移期两套并存，等任务链全部搬完再收口
+//! 前身**（如 `CatIo`）。本文件不替换它们 —— 迁移期两套并存，等任务链全部搬完再收口
 //! （见 `WB-AUTOMATION-ARCH.md` §10）。
 
 use serde_json::{json, Value};
@@ -110,7 +110,7 @@ pub const WORKBUDDY_PRODUCT: &str = "workbuddy";
 
 /// 任务链的**唯一真实请求出口**：准入 → 发送 → 结果回写。
 ///
-/// `activity.rs` / `cat.rs` / `school.rs` 以及后续的 `wb_tasks` 都必须走这里，不许自己拼
+/// `activity.rs` / `cat.rs` 以及后续的 `wb_tasks` 都必须走这里，不许自己拼
 /// `authed_json_request_for`：那些路径会**静默绕过** RPM / 并发 / 最小间隔 / 账号冷却
 /// （`docs/specs/WB-AUTOMATION-ARCH.md` §3.1）。源码级闸门见测试
 /// `task_modules_never_call_http_directly`。
@@ -430,7 +430,7 @@ mod tests {
         assert!(!body.to_string().contains("tok"));
     }
 
-    /// 源码级闸门：`activity.rs` / `cat.rs` / `school.rs` **不许**自己发请求。
+    /// 源码级闸门：`activity.rs` / `cat.rs` **不许**自己发请求。
     ///
     /// 用 `include_str!` 把源码带进编译产物，和代码同源：谁再写回
     /// `authed_json_request_for(` / `http_request(` / `reqwest::`，`cargo test` 立刻红。
@@ -440,7 +440,6 @@ mod tests {
         let modules = [
             ("activity.rs", include_str!("activity.rs")),
             ("cat.rs", include_str!("cat.rs")),
-            ("school.rs", include_str!("school.rs")),
         ];
         for (name, source) in modules {
             for forbidden in ["authed_json_request_for(", "http_request(", "reqwest::"] {

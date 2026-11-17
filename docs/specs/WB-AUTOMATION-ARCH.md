@@ -38,7 +38,7 @@
 | 3 | 事件上报 | `POST /v2/report`；上游按 `(eventCode, id)` 去重 ⇒ 专家/团队 id 必须互异（`wb_tasks.py:1210`），`EXPERT_ID_POOL` 18 条（`:234`）、`TEAM_ID_POOL` 8 条 | `activity.rs` 的 `/v2/report` 构造器只有对话/心跳类事件 | 收口到 `task_event`（§3.5）：按 `kind` 生成，`(eventCode, id)` 每次尝试互异 |
 | 4 | 复读进度再领奖 | 上报后最多 6 次复读（1.5s / 涨了再 2.5s），未达 `target` 则**顺延到下一轮**（`wb_tasks.py:1241`–`1252`） | `cat.rs` 有同类轮询 | 固化为 verify-before-claim（§4） |
 | 5 | 领奖 | `POST /activity/growth/tasks/{code}/claim`，体 `{}`；`400 task not completed` 不当致命错（`wb_tasks.py:426`） | `black_cat` 有 | 通用 |
-| 6 | 小程序族 | `MP_TASK_SPECS`（`Sequential_Tasks_1..6` + `school_season`，`wb_tasks.py:52`）；头 `X-Client-Product: workbuddy-mp`、`X-Client-Version: 2.4.0`、`X-Client-Platform: mp-weixin`、`X-Platform: wechatmp` + 微信小程序 UA（`:38`–`:51`） | 无（`school.rs` 只做校园日） | 独立 `feature=mp_tasks` |
+| 6 | 小程序族 | `MP_TASK_SPECS`（`Sequential_Tasks_1..6` + `school_season`，`wb_tasks.py:52`）；头 `X-Client-Product: workbuddy-mp`、`X-Client-Version: 2.4.0`、`X-Client-Platform: mp-weixin`、`X-Platform: wechatmp` + 微信小程序 UA（`:38`–`:51`） | 无（校园日模块已移除） | 独立 `feature=mp_tasks` |
 | 7 | 运营活动族 | 独立契约 `/portal/activity/*`：`campaign_starbucks_2026`（对话 3 次 / 召唤专家 / 解锁 App）、`campaign_reporter_2026`（专家 / 技能 / 桌面灵感）；节流 3s、轮询 6s、慢档 10s、领奖 4s/5s、桌面等待 60s（`wb_tasks.py:66`–`74`） | 无（`qoder/campaign.rs` 属 Qoder） | 独立 `feature=campaign`，常量照搬 |
 | 8 | 真实动作类 | `skill_share` 先建 c2c 分享渠道再上报渠道动作（`wb_tasks.py:190`）；`template_5` 用服务端场景 id + 四事件组（`:198`） | 无 | `growth_tasks` 的子流程 |
 | 9 | 猫猫旅行 | `GET /activity/growth/buddy/travel/status` + `POST …/travel/claim`；`first_buddy` 是所有 single 任务与旅行的前置（`wb_tasks.py:795`） | `travel.rs` 已有派出/领奖循环 | 复用，补 `first_buddy` 前置判定 |
@@ -98,12 +98,12 @@ task kernel（纯函数）
 - 响应回写 `risk_control::record_platform_response`：`401/403` → 账号暂停，`429` → 冷却。
 - 任务链自带的最小间隔（≥ 1.0s）是**第二道**闸：风控关掉时它仍然生效，因为上游按行为计时，
   与本软件的设置无关。
-- **已收口**：`activity.rs` / `cat.rs` / `school.rs` 的真实实现只经 `task_io::send`
+- **已收口**：`activity.rs` / `cat.rs` 的真实实现只经 `task_io::send`
   （准入 → 请求 → 结果回写），文件里不再出现 `authed_json_request_for` / `reqwest::`；
   回归由源码级单测 `task_io::tests::task_modules_never_call_http_directly` 拦 ——
-  它用 `include_str!` 把这三个文件读进编译产物，谁再写回直连就红。
+  它用 `include_str!` 把这两个文件读进编译产物，谁再写回直连就红。
 - **尚未并入 seam**：`travel.rs` 仍自己调 `risk_control`（准入与回写都在，但没走 `TaskIo`），
-  在 travel 迁移步里一并收口；迁移期 `TaskIo` 与既有 `CatIo` / `SchoolIo` 两套缝并存。
+  在 travel 迁移步里一并收口；迁移期 `TaskIo` 与既有 `CatIo` 两套缝并存。
 
 ### 3.3 每账号开关（`AccountsPage`）
 
@@ -411,12 +411,12 @@ GET  {chat_base}/v2/activity/growth/tasks
   那条 Chrome UA），CLI 形态用 `outbound_headers::CLI_USER_AGENT`，chat 形态由
   `identity::chat_user_agent(region, version, cli)` 构造。唯一允许写死的是
   `MP_USER_AGENT`——官方小程序 UA 里没有版本 token，也没有可解析来源。
-  测试用 `include_str!` 扫 `school.rs` / `activity.rs` / `cat.rs` / `upstream.rs`，
+  测试用 `include_str!` 扫 `activity.rs` / `cat.rs` / `upstream.rs`，
   出现 UA 字面量即红。
 - **顺序是构造契约，不是线上字节序证据**：`reqwest` / `http::HeaderMap` 内部是哈希表，
   实际发出的字节顺序不受本表控制。快照（`HeaderSet::wire_snapshot`，`name: value` 每行一条）
   防的是**头名与取值的漂移**；要做到逐字节线序必须换自建传输层，本期不做。
-- **不猜改线上行为**：本次只收敛已在用的头，取值逐字不变——`school_extra` → `mp`，
+- **不猜改线上行为**：本次只收敛已在用的头，取值逐字不变——小程序域头 → `mp`，
   `growth_extra` 与猫猫领奖的 web 降级 → `campaign_portal`，`upstream::common_headers` → `cli`。
   领奖那张表的头名从 `Origin`/`Referer` 改成小写，是 `HashMap` 键的字节差异，
   上线时 `HeaderName` 仍归一为同一个头名，线上字节不变。
