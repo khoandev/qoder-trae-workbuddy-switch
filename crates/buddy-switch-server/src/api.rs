@@ -6227,8 +6227,13 @@ mod tests {
             "首页应是 text/html"
         );
 
-        // ② 没会话 ⇒ `/api/*` 401，且不带 `WWW-Authenticate`（否则浏览器弹原生登录框）。
-        let (status, headers, body) = auth_call(app(), Method::GET, "/api/status", None, None).await;
+        // ② `/api/status` 是公开探针；其余 `/api/*` 没会话 ⇒ 401，且不带
+        //    `WWW-Authenticate`（否则浏览器弹原生登录框）。
+        let (status, _, body) = auth_call(app(), Method::GET, "/api/status", None, None).await;
+        assert_eq!(status, StatusCode::OK, "状态探针必须免登录: {body}");
+
+        let (status, headers, body) =
+            auth_call(app(), Method::GET, "/api/accounts", None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
         assert_eq!(body["reason"], "unauthorized", "{body}");
         assert!(
@@ -6282,26 +6287,14 @@ mod tests {
         let cookie = set_cookie.split(';').next().unwrap().to_string();
         assert!(cookie.starts_with("buddy_switch_session="), "{cookie}");
 
-        // ⑥ 带上会话 Cookie 后同一端点放行。
-        let (status, _, body) = auth_call(
-            app(),
-            Method::GET,
-            "/api/status",
-            Some(&cookie),
-            None,
-        )
-        .await;
+        // ⑥ 带上会话 Cookie 后受保护端点放行。
+        let (status, _, body) =
+            auth_call(app(), Method::GET, "/api/accounts", Some(&cookie), None).await;
         assert_eq!(status, StatusCode::OK, "有效会话必须放行: {body}");
 
         // ⑦ 状态端点如实报「已登录」。
-        let (status, _, body) = auth_call(
-            app(),
-            Method::GET,
-            "/api/auth/status",
-            Some(&cookie),
-            None,
-        )
-        .await;
+        let (status, _, body) =
+            auth_call(app(), Method::GET, "/api/auth/status", Some(&cookie), None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["required"], true, "{body}");
         assert_eq!(body["authenticated"], true, "{body}");
@@ -6323,8 +6316,8 @@ mod tests {
         assert!(cleared.contains("Max-Age=0"), "{cleared}");
 
         // ⑨ 旧 Cookie 立刻失效 —— 这才是「吊销」而不只是「清浏览器」。
-        let (status, _, body) = auth_call(app(), Method::GET, "/api/status", Some(&cookie), None)
-            .await;
+        let (status, _, body) =
+            auth_call(app(), Method::GET, "/api/accounts", Some(&cookie), None).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -6341,7 +6334,11 @@ mod tests {
         let app = || router_with_auth(crate::app_auth::AuthPolicy::from_env(None));
 
         let (status, _, body) = auth_call(app(), Method::GET, "/api/status", None, None).await;
-        assert_eq!(status, StatusCode::OK, "auth 关闭时管理面必须可直接访问: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "auth 关闭时管理面必须可直接访问: {body}"
+        );
 
         let (status, _, body) = auth_call(app(), Method::GET, "/api/auth/status", None, None).await;
         assert_eq!(status, StatusCode::OK, "{body}");

@@ -166,7 +166,12 @@ pub async fn bearer_auth(
             "缺少凭据：请在 Authorization 头携带 `Bearer <API Key>`",
         );
     };
-    match state.key_store.verify(key) {
+    // 台账里的 Key 优先；系统密钥只在查不到记录时兜底。
+    let record = state.key_store.verify(key).or_else(|| {
+        crate::system_key::matches(key)
+            .then(|| crate::qoder::apikey::QoderApiKeyRecord::system(QoderRegion::default()))
+    });
+    match record {
         Some(record) => {
             request
                 .extensions_mut()

@@ -106,6 +106,33 @@ pub struct UnifiedApiKeyRecord {
 }
 
 impl UnifiedApiKeyRecord {
+    /// `BUDDY_SWITCH_AUTH_KEY` 的**临时**记录（永不落盘）。
+    ///
+    /// 授权范围由调用方按**当前已启用的命名空间**填入；`biz_namespace` 仍须显式给，
+    /// 因为 `/biz/*` 没有模型名前缀可推断目标。
+    pub fn system(namespaces: Vec<String>, biz_namespace: Option<String>) -> Self {
+        Self {
+            id: crate::system_key::SYSTEM_KEY_ID.to_string(),
+            name: "BUDDY_SWITCH_AUTH_KEY".to_string(),
+            prefix: String::new(),
+            suffix: String::new(),
+            hash: String::new(),
+            plaintext: None,
+            namespaces,
+            biz_namespace,
+            created_at: 0,
+            revoked_at: None,
+            last_used_at: None,
+            quota_mode: QuotaMode::default(),
+            quota_limit: 0,
+            quota_unit: QuotaUnit::default(),
+            quota_period: QuotaPeriod::default(),
+            scope_mode: ScopeMode::default(),
+            scope_accounts: Vec::new(),
+            scope_groups: Vec::new(),
+        }
+    }
+
     /// 是否处于启用态。
     pub fn is_active(&self) -> bool {
         self.revoked_at.is_none()

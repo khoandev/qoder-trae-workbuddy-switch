@@ -165,7 +165,7 @@ curl -s -H "Authorization: Bearer $TOKEN" https://ghcr.io/v2/khoandev/buddy-swit
 | `BUDDY_SWITCH_HOST` | `0.0.0.0`（镜像内置） | 监听地址。CLI 原生默认是 `127.0.0.1`，容器里必须改成 `0.0.0.0` 才能从宿主访问。 |
 | `BUDDY_SWITCH_PORT` | `57890` | 监听端口。 |
 | `BUDDY_SWITCH_ALLOWED_HOSTS` | 空（只接受回环） | **额外**允许的 `Host`，逗号分隔、可带端口。**只有「跨机直连」才需要** —— 见下面「安全」段。填 `*` 无效（会被忽略）。 |
-| `BUDDY_SWITCH_AUTH_KEY` | 空（不开登录） | **管理面登录密钥**。设置后访问 webui 需先输入该密钥；会话 Cookie 有效期 7 天，服务重启后需重新登录。建议用 ≥16 位随机串。 |
+| `BUDDY_SWITCH_AUTH_KEY` | 空（不开登录） | **管理面登录密钥 + 系统 Bearer 密钥**。设置后访问 webui 需先输入该密钥；同一个值也可直接作为 `Authorization: Bearer <key>` 调用 `/api/*`（`/api/status` 公开）和四个网关的 `/v1/*`，不必另建普通 API Key。会话 Cookie 有效期 7 天，服务重启后需重新登录。建议用 ≥16 位随机串。 |
 
 优先级：**命令行参数 > 环境变量 > 内置默认值**。即 `docker run … buddy-switch serve --port 8080`
 会覆盖 `BUDDY_SWITCH_PORT`。
@@ -230,6 +230,10 @@ docker run --rm -v buddy-switch-data:/data -v "$PWD:/backup" alpine \
 - **想挡住陌生人，就先设 `BUDDY_SWITCH_AUTH_KEY`**（不只是跨机访问；任何能被别人
   打开的端口都值得设）。密钥走 `POST /api/auth/login` 的请求体，因此**对外暴露时
   必须套 TLS / 反向代理** —— 明文 HTTP 下密钥在同一条链路上裸奔。
+- `GET /api/status` **免登录**（Docker / 探针用）；其余 `/api/*` 仍需 Cookie 或
+  `Authorization: Bearer <BUDDY_SWITCH_AUTH_KEY>`。该 Bearer 也适用于 `/v1/*`：
+  系统密钥按各网关默认区域/变体选号（WB/Qoder = CN，统一入口 = 已启用命名空间），
+  不受普通 Key 的配额与账号白名单约束。
 - 默认只发布到宿主机回环 `127.0.0.1:57890`（`docker-compose.yml` 里写死的）。
 - 服务端在监听**非回环**地址时会打印一条显式警告。
 - **管理面有来源校验**：只接受 `Host` 为 `127.0.0.1` / `localhost` / `::1` 的请求，
@@ -278,7 +282,7 @@ docker run --rm -v buddy-switch-data:/data -v "$PWD:/backup" alpine \
 方式补 `BUDDY_SWITCH_ALLOWED_HOSTS` 即可；**SSH 隧道与回环访问不受影响**。
 
 容器内的加固已经做了：非 root 用户（uid `10001`）运行、只装 `ca-certificates` 与 `curl`、
-`/data` 由 `buddy` 持有。健康检查打的是 `http://127.0.0.1:57890/api/status`（`Host` 是回环），
+`/data` 由 `buddy` 持有。健康检查打的是 `http://127.0.0.1:57890/api/auth/status`（`Host` 是回环），
 不受上面这条校验影响。
 
 ---

@@ -71,13 +71,14 @@ services:
       # 详见 docs/guides/DOCKER.md 的「安全」段。
       # BUDDY_SWITCH_ALLOWED_HOSTS: ""
       # 管理面的登录密钥（默认不设 = 不开登录）。设了之后打开 webui 要先输入它；
+      # 同一个值也可作为 `Authorization: Bearer <key>` 调管理 API 和 `/v1/*`。
       # 会话 Cookie 有效期 7 天，重启容器后需重新登录。建议用 ≥16 位随机串。
       # BUDDY_SWITCH_AUTH_KEY: "change-me-to-a-long-random-string"
     healthcheck:
       # 用服务端自己的 API 路由做探活：SPA 兜底会让「任何路径都返回 200」，
       # 因此不能拿 `/` 判断存活 —— 必须打一个真实的 API 路由。
-      # ⚠️ 必须是**公开**的那一条：设了 `BUDDY_SWITCH_AUTH_KEY` 后 `/api/status` 会回
-      # 401，探活就会把健康的容器标成 unhealthy；`/api/auth/status` 恒回 200。
+      # ⚠️ 必须是**公开**的那一条：`/api/status` 与 `/api/auth/status` 都免登录，
+      # 其余 `/api/*` 在设了 `BUDDY_SWITCH_AUTH_KEY` 后会回 401。
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:57890/api/auth/status"]
       interval: 30s
       timeout: 5s

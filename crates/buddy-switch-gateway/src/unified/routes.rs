@@ -879,20 +879,29 @@ async fn authenticate(
             "缺少凭据：请用 `Authorization: Bearer sk-uni-…` 或 `x-api-key: sk-uni-…` 提供统一网关的密钥。",
         ));
     };
-    match state.keys.verify(presented) {
-        Some(record) => {
-            state.keys.touch(&record.id);
-            Ok(record)
-        }
-        // 无效 / 已吊销 / 拿的是两个既有网关的 Key —— 文案要覆盖最后这种最常见的误用
-        None => Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "invalid_request_error",
-            "invalid_api_key",
-            "密钥无效或已吊销。注意：统一入口用**独立的**密钥库（`sk-uni-` 开头）——\
-             两个既有网关的 `sk-wb-` / `sk-trae-` 密钥不能在这里使用。",
-        )),
+    // 台账里的 Key 优先；系统密钥只在查不到记录时兜底。
+    if let Some(record) = state.keys.verify(presented) {
+        state.keys.touch(&record.id);
+        return Ok(record);
     }
+    if crate::system_key::matches(presented) {
+        let config = state.config_snapshot().await;
+        let namespaces = config
+            .enabled_namespaces()
+            .iter()
+            .map(|spec| spec.id.to_string())
+            .collect();
+        // `/biz/*` 没有模型名前缀可推断命名空间 ⇒ 系统密钥不授予业务转发。
+        return Ok(UnifiedApiKeyRecord::system(namespaces, None));
+    }
+    // 无效 / 已吊销 / 拿的是两个既有网关的 Key —— 文案要覆盖最后这种最常见的误用
+    Err(error_response(
+        StatusCode::UNAUTHORIZED,
+        "invalid_request_error",
+        "invalid_api_key",
+        "密钥无效或已吊销。注意：统一入口用**独立的**密钥库（`sk-uni-` 开头）——\
+         两个既有网关的 `sk-wb-` / `sk-trae-` 密钥不能在这里使用。",
+    ))
 }
 
 /// OpenAI 形状的错误体（与两条既有网关**同形**，让同一个客户端三处都能读懂）。

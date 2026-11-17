@@ -4,7 +4,7 @@
 
 Webui quản trị của `buddy-switch-server` hiện **không có đăng nhập**; ai vào được cổng 57890 là đọc/ghi được toàn bộ账号库 và gateway key (xem `docs/guides/DOCKER.md` §安全). Yêu cầu: thêm lớp đăng nhập bằng **một key lấy từ biến môi trường**, dùng **trang đăng nhập riêng + cookie phiên HttpOnly** (người dùng đã chọn), không dùng Basic Auth.
 
-Phạm vi: chỉ **management surface** của `buddy-switch-server` (`buddy-switch serve`, npm CLI, Docker). Tauri desktop dùng `invoke`, không có HTTP management surface nên không bị ảnh hưởng. Các cổng API gateway (`/v1/*`, 57891/57892/57894/57895) giữ nguyên Bearer key riêng; **không** áp dụng key này cho gateway.
+Phạm vi: chỉ **management surface** của `buddy-switch-server` (`buddy-switch serve`, npm CLI, Docker). Tauri desktop dùng `invoke`, không có HTTP management surface nên không bị ảnh hưởng. Các cổng API gateway (`/v1/*`, 57891/57892/57894/57895) vẫn nhận Bearer key riêng; **thêm** khả năng dùng chính env key như *system key* (fallback **sau** key库), không thay thế key thường.
 
 Trạng thái cuối:
 - `BUDDY_SWITCH_AUTH_KEY` chưa set/rỗng → auth tắt, hành vi y hệt hiện tại.
@@ -350,12 +350,12 @@ Không thêm release notes/changelog.
      cargo run -p buddy-switch-server -- serve --no-open --port 57899
    ```
    Ở terminal khác:
-   - `curl -i http://127.0.0.1:57899/api/status` ⇒ `401`, không có `WWW-Authenticate`.
+   - `curl -i http://127.0.0.1:57899/api/status` ⇒ `200` (免登录探针); `/api/accounts` ⇒ `401`, không có `WWW-Authenticate`.
    - `curl -i -H 'Content-Type: application/json' -d '{"key":"wrong"}' http://127.0.0.1:57899/api/auth/login` ⇒ `401`, reason `invalid_key`.
    - `curl -i -c /tmp/bs-cookie -H 'Content-Type: application/json' -d '{"key":"test-key-123456"}' http://127.0.0.1:57899/api/auth/login` ⇒ `200` + `Set-Cookie: buddy_switch_session=...; Path=/api; HttpOnly; SameSite=Strict; Max-Age=604800`.
-   - `curl -i -b /tmp/bs-cookie http://127.0.0.1:57899/api/status` ⇒ `200`.
+   - `curl -i -b /tmp/bs-cookie http://127.0.0.1:57899/api/accounts` ⇒ `200`.
    - `curl -i -b /tmp/bs-cookie -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:57899/api/auth/logout` ⇒ `200` + `Max-Age=0`.
-   - Gọi lại `/api/status` với cookie cũ ⇒ `401`.
+   - Gọi lại `/api/accounts` với cookie cũ ⇒ `401`.
    - `curl -i http://127.0.0.1:57899/` ⇒ `200 text/html` (login page load được).
 
 4. **Manual UI** (cùng server trên, mở browser):
@@ -371,7 +371,7 @@ Không thêm release notes/changelog.
 - Tên biến môi trường là `BUDDY_SWITCH_AUTH_KEY`; đổi tên chỉ cần sửa `app_auth::AUTH_KEY_ENV`.
 - Session **in-memory**, TTL 7 ngày; restart server làm mất session. Nếu cần sống qua restart, thay bằng cookie ký HMAC — ngoài phạm vi hiện tại, không tự ý đổi.
 - Static assets (`/`, `/assets/*`, SPA fallback) vẫn public; bảo vệ dữ liệu nằm ở `/api/*`. Login page do React render, không cần một route HTML riêng.
-- Gateway `/v1/*` không chịu key này (giữ Bearer key riêng). Nếu gắn auth middleware lên gateway, client OpenAI/Anthropic hiện có sẽ hỏng.
+- Gateway `/v1/*` **không** bị chặn bởi auth middleware (client OpenAI/Anthropic hiện có vẫn dùng key thường). Env key chỉ là *thêm một cách xác thực*: key库 được kiểm tra trước, env key chỉ fallback khi không khớp record nào.
 - `Secure` chỉ bật khi thấy `X-Forwarded-Proto: https`; chạy HTTP trực tiếp (SSH tunnel/localhost) vẫn đăng nhập được. Khi mở ra Internet phải dùng TLS/reverse proxy.
 - Reverse proxy rewrite `Host` về `127.0.0.1:57890` có thể làm login POST bị `403 cross_origin` do `Origin` của browser vẫn là domain ngoài. Cách đúng: giữ nguyên `Host` và thêm domain vào `BUDDY_SWITCH_ALLOWED_HOSTS` (đã có trong DOCKER.md), hoặc rewrite cả `Origin` ở proxy. Không nới `api_guard` trong thay đổi này.
 - Nếu `uuid` không dùng được vì lý do feature/lock, fallback: `getrandom = "0.2"` (đã có trong lock) + tự encode 32 byte thành hex; giữ nguyên token shape 32 hex.

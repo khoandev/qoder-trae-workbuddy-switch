@@ -190,21 +190,31 @@ pub async fn bearer_auth(
 
     match presented {
         None => deny("缺少凭据：请在 Authorization 头携带 `Bearer <API Key>`"),
-        Some(key) => match state.key_store.verify(key) {
-            Some(record) => {
-                // 归属产品线透传给 handler（决定用哪个账号池）。
-                request
-                    .extensions_mut()
-                    .insert(TraeKeyVariant(record.variant));
-                // ★ issue #76：整条 Key 也塞进扩展（配额 / 白名单 / 记账要用）。
-                request
-                    .extensions_mut()
-                    .insert(TraeKeyContext(std::sync::Arc::new(record.clone())));
-                state.key_store.touch(&record.id);
-                next.run(request).await
+        Some(key) => {
+            // 台账里的 Key 优先；系统密钥只在查不到记录时兜底。
+            let record = state.key_store.verify(key).or_else(|| {
+                crate::system_key::matches(key)
+                    .then(|| super::apikey::TraeApiKeyRecord::system(TraeVariant::default()))
+            });
+            match record {
+                Some(record) => {
+                    // 归属产品线透传给 handler（决定用哪个账号池）。
+                    request
+                        .extensions_mut()
+                        .insert(TraeKeyVariant(record.variant));
+                    // ★ issue #76：整条 Key 也塞进扩展（配额 / 白名单 / 记账要用）。
+                    request
+                        .extensions_mut()
+                        .insert(TraeKeyContext(std::sync::Arc::new(record.clone())));
+                    // 系统密钥不在台账里，不能写 last_used_at。
+                    if record.id != crate::system_key::SYSTEM_KEY_ID {
+                        state.key_store.touch(&record.id);
+                    }
+                    next.run(request).await
+                }
+                None => deny("API Key 无效：请到「API 服务」页创建或复制一把可用的 Key"),
             }
-            None => deny("API Key 无效：请到「API 服务」页创建或复制一把可用的 Key"),
-        },
+        }
     }
 }
 

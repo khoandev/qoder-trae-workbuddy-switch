@@ -50,6 +50,8 @@ pub mod routes;
 pub mod session_headers;
 pub mod state;
 pub mod sticky;
+/// `BUDDY_SWITCH_AUTH_KEY` 作为系统密钥的网关校验（与普通 API Key 台账并行）。
+pub mod system_key;
 pub mod timeutil;
 /// Trae 的 OpenAI 兼容网关（**平行第二套实现**，与上面的 WorkBuddy 网关互不复用）。
 ///

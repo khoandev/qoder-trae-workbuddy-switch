@@ -376,6 +376,32 @@ pub struct ApiKeyRecord {
 }
 
 impl ApiKeyRecord {
+    /// `BUDDY_SWITCH_AUTH_KEY` 的**临时**记录：只供本次请求使用，永不落盘。
+    ///
+    /// 策略取默认值（不限配额、全部账号）；归属用各网关的默认区域。
+    /// 需要跨区域 / 精确账号范围时，仍应创建普通 API Key。
+    pub fn system(region: Region) -> Self {
+        Self {
+            id: crate::system_key::SYSTEM_KEY_ID.to_string(),
+            name: "BUDDY_SWITCH_AUTH_KEY".to_string(),
+            region,
+            prefix: String::new(),
+            suffix: String::new(),
+            hash: String::new(),
+            plaintext: None,
+            created_at: 0,
+            revoked_at: None,
+            last_used_at: None,
+            quota_mode: QuotaMode::default(),
+            quota_limit: 0,
+            quota_unit: QuotaUnit::default(),
+            quota_period: QuotaPeriod::default(),
+            scope_mode: ScopeMode::default(),
+            scope_accounts: Vec::new(),
+            scope_groups: Vec::new(),
+        }
+    }
+
     /// 取出策略部分（中继层只认策略，不认 hash / 明文）。
     pub fn policy(&self) -> KeyPolicy {
         KeyPolicy {

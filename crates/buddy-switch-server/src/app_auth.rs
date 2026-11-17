@@ -22,8 +22,11 @@
 //!
 //! ## 不做什么
 //!
-//! - **不碰网关**（`/v1/*`、57891/57892/57894/57895）：那里各用各的 Bearer key，
-//!   给它们套上 Cookie 登录会直接打挂所有 OpenAI / Anthropic 客户端。
+//! - **网关不套 Cookie 登录**（`/v1/*`、57891/57892/57894/57895）：那里各用各的 Bearer key。
+//!   但同一个 `BUDDY_SWITCH_AUTH_KEY` 也能直接当 Bearer 调 `/v1/*`（系统密钥，见
+//!   [`buddy_switch_gateway::system_key`]）—— 不要求先建普通 API Key。
+//! - **`GET /api/status` 免登录**：Docker / 负载均衡探针只需要存活信息。其余 `/api/*`
+//!   仍受会话或系统密钥保护。
 //! - **不保护静态资源**：`dist` 与 `index.html` 不含任何凭据，登录页本身也要能被加载。
 //!   数据面全在 `/api/*` 上。
 
@@ -33,15 +36,18 @@ use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue};
-use axum::Extension;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::Extension;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
 /// 管理面登录密钥的环境变量名（未设置 / 空串 = 不开启登录）。
-pub const AUTH_KEY_ENV: &str = "BUDDY_SWITCH_AUTH_KEY";
+pub const AUTH_KEY_ENV: &str = buddy_switch_gateway::system_key::SYSTEM_KEY_ENV;
+
+/// 免登录的存活探针路径（与网关 `/health` 的分工：这里探的是管理面 + 进程）。
+const PUBLIC_PATHS: [&str; 1] = ["/api/status"];
 
 /// 会话 Cookie 的名字。
 pub const SESSION_COOKIE: &str = "buddy_switch_session";
@@ -211,8 +217,7 @@ fn set_cookie(token: &str, secure: bool) -> String {
 
 /// 登出时下发的 `Set-Cookie`（同名同属性，值清空 + 立即过期）。
 fn clear_cookie(secure: bool) -> String {
-    let mut value =
-        format!("{SESSION_COOKIE}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0");
+    let mut value = format!("{SESSION_COOKIE}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0");
     if secure {
         value.push_str("; Secure");
     }
@@ -223,10 +228,9 @@ fn clear_cookie(secure: bool) -> String {
 ///
 /// 认证响应能被中间缓存留下就是凭据泄漏（登录成功响应里还带着 `Set-Cookie`）。
 fn with_no_store(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }
 
@@ -285,10 +289,7 @@ async fn api_auth_login(
     if !policy.enabled() {
         // 关闭状态下这条端点没有意义，但回 200 而不是 404：老前端 / 手写脚本
         // 不该因为「登录没开」而看到一个报错。
-        return auth_json(
-            axum::http::StatusCode::OK,
-            json!({ "ok": true }),
-        );
+        return auth_json(axum::http::StatusCode::OK, json!({ "ok": true }));
     }
     let candidate = body.get("key").and_then(Value::as_str).unwrap_or("");
     if !policy.accepts(candidate) {
@@ -316,12 +317,22 @@ async fn api_auth_logout(headers: HeaderMap) -> Response {
     with_set_cookie(response, clear_cookie(request_is_https(&headers)))
 }
 
+/// 从 `Authorization: Bearer <key>` 取候选系统密钥。
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?.trim();
+    raw.strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// axum 中间件：把 [`AuthPolicy`] 套在 `api_routes()` 上。
 ///
-/// 三条纪律：
+/// 四条纪律：
 /// 1. 登录关闭 ⇒ 直接放行（既有行为不变）；
-/// 2. Cookie 有效 ⇒ 放行；
-/// 3. 其余一律 401 JSON，**不带** `WWW-Authenticate`（同上，别惊动浏览器）。
+/// 2. [`PUBLIC_PATHS`]（`GET /api/status`）⇒ 放行，供 Docker / 探针使用；
+/// 3. Cookie 有效，或 `Authorization: Bearer <BUDDY_SWITCH_AUTH_KEY>` ⇒ 放行；
+/// 4. 其余一律 401 JSON，**不带** `WWW-Authenticate`（同上，别惊动浏览器）。
 ///
 /// 这里刻意**不**做 fail-open：拿不到 `State<AuthPolicy>` 是路由器装配错误，
 /// axum 会直接 500，而不是「忘了装策略就放行所有人」。
@@ -330,10 +341,13 @@ pub async fn require_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    if !policy.enabled() {
+    if !policy.enabled() || PUBLIC_PATHS.contains(&request.uri().path()) {
         return next.run(request).await;
     }
     if cookie_token(request.headers()).is_some_and(session_valid) {
+        return next.run(request).await;
+    }
+    if bearer_token(request.headers()).is_some_and(|candidate| policy.accepts(candidate)) {
         return next.run(request).await;
     }
     auth_json(
@@ -354,7 +368,10 @@ mod tests {
     fn from_env_trims_and_treats_blank_as_disabled() {
         assert!(!AuthPolicy::from_env(None).enabled(), "None ⇒ 关闭");
         assert!(!AuthPolicy::from_env(Some("")).enabled(), "空串 ⇒ 关闭");
-        assert!(!AuthPolicy::from_env(Some("   ")).enabled(), "全空白 ⇒ 关闭");
+        assert!(
+            !AuthPolicy::from_env(Some("   ")).enabled(),
+            "全空白 ⇒ 关闭"
+        );
         assert!(!AuthPolicy::from_env(Some("\t\n")).enabled());
         assert!(AuthPolicy::from_env(Some("k")).enabled(), "单字符也要生效");
         assert_eq!(
@@ -406,15 +423,13 @@ mod tests {
     fn set_and_clear_cookie_carry_the_hardening_attributes() {
         let cookie = set_cookie("abc", false);
         assert!(cookie.starts_with("buddy_switch_session=abc; "), "{cookie}");
-        for required in [
-            "Path=/api",
-            "HttpOnly",
-            "SameSite=Strict",
-            "Max-Age=604800",
-        ] {
+        for required in ["Path=/api", "HttpOnly", "SameSite=Strict", "Max-Age=604800"] {
             assert!(cookie.contains(required), "缺 {required}: {cookie}");
         }
-        assert!(!cookie.contains("Secure"), "HTTP 直连时不能加 Secure: {cookie}");
+        assert!(
+            !cookie.contains("Secure"),
+            "HTTP 直连时不能加 Secure: {cookie}"
+        );
         assert!(!cookie.contains("Domain"), "不该限定 Domain: {cookie}");
         assert!(set_cookie("abc", true).contains("; Secure"));
 
@@ -449,10 +464,10 @@ mod tests {
         for bogus in [
             "",
             "abc",
-            "0123456789abcdef0123456789abcde",      // 31
-            "0123456789abcdef0123456789abcdef0",   // 33
-            "0123456789ABCDEF0123456789abcdef",    // 大写
-            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",    // 非十六进制
+            "0123456789abcdef0123456789abcde",   // 31
+            "0123456789abcdef0123456789abcdef0", // 33
+            "0123456789ABCDEF0123456789abcdef",  // 大写
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",  // 非十六进制
         ] {
             assert!(!session_valid(bogus), "不该认这个 Token: {bogus}");
         }
@@ -461,12 +476,25 @@ mod tests {
     }
 
     async fn probe(policy: AuthPolicy, cookie: Option<&str>) -> (StatusCode, String) {
+        probe_with(policy, "/x", cookie, None).await
+    }
+
+    async fn probe_with(
+        policy: AuthPolicy,
+        uri: &str,
+        cookie: Option<&str>,
+        authorization: Option<&str>,
+    ) -> (StatusCode, String) {
         let app = Router::new()
             .route("/x", get(|| async { "ok" }))
+            .route("/api/status", get(|| async { "ok" }))
             .layer(from_fn_with_state(policy, require_auth));
-        let mut builder = Request::builder().uri("/x");
+        let mut builder = Request::builder().uri(uri);
         if let Some(cookie) = cookie {
             builder = builder.header("cookie", cookie);
+        }
+        if let Some(authorization) = authorization {
+            builder = builder.header(header::AUTHORIZATION, authorization);
         }
         let response = app
             .oneshot(builder.body(Body::empty()).unwrap())
@@ -515,5 +543,35 @@ mod tests {
         // 关闭状态下连乱写的 Cookie 也不影响。
         let (status, _) = probe(AuthPolicy::from_env(None), Some("x=y")).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn status_probe_is_public_even_when_login_is_enabled() {
+        let policy = AuthPolicy::from_env(Some("test-key"));
+        let (status, body) = probe_with(policy.clone(), "/api/status", None, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // 其余 `/api/*` 仍受保护。
+        let (status, _) = probe(policy, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn bearer_system_key_unlocks_management_api() {
+        let policy = AuthPolicy::from_env(Some("test-key"));
+
+        let (status, body) = probe_with(policy.clone(), "/x", None, Some("Bearer test-key")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // 大小写不敏感的前缀、首尾空白都接受。
+        let (status, _) = probe_with(policy.clone(), "/x", None, Some("bearer  test-key ")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = probe_with(policy.clone(), "/x", None, Some("Bearer wrong")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // 没有 Bearer 前缀的裸值不当成密钥。
+        let (status, _) = probe_with(policy, "/x", None, Some("test-key")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

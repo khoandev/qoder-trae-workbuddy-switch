@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use crate::apikey::ApiKeyRecord;
 use crate::error::GatewayError;
 use crate::state::GatewayState;
+use buddy_switch_core::modules::region::Region;
 
 /// 从请求头提取 API Key：优先 `x-api-key`，其次 `Authorization: Bearer <key>`。
 pub(crate) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
@@ -57,12 +58,19 @@ pub(crate) fn authenticate(
             "缺少凭据：请在 Authorization 头携带 `Bearer <API Key>`".to_string(),
         )
     })?;
-    let record = state
-        .keys
-        .verify(&presented)
-        .ok_or_else(|| GatewayError::Unauthorized("API Key 无效或已吊销".to_string()))?;
-    state.keys.touch(&record.id);
-    Ok(record)
+    // 台账里的 Key 优先：系统密钥与某把用户 Key 同值时，仍按该 Key 的 region/策略走。
+    if let Some(record) = state.keys.verify(&presented) {
+        state.keys.touch(&record.id);
+        return Ok(record);
+    }
+    // `BUDDY_SWITCH_AUTH_KEY`：部署方注入的系统密钥，不是台账里的记录。
+    // 归属取默认区域（CN）；需要跨区时必须创建普通 Key（或开启模型名前缀重路由）。
+    if crate::system_key::matches(&presented) {
+        return Ok(ApiKeyRecord::system(Region::default()));
+    }
+    Err(GatewayError::Unauthorized(
+        "API Key 无效或已吊销".to_string(),
+    ))
 }
 
 /// JSON 响应。

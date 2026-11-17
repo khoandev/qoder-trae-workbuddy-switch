@@ -136,6 +136,29 @@ pub struct TraeApiKeyRecord {
 }
 
 impl TraeApiKeyRecord {
+    /// `BUDDY_SWITCH_AUTH_KEY` 的**临时**记录（永不落盘）。归属取 Trae 默认变体。
+    pub fn system(variant: TraeVariant) -> Self {
+        Self {
+            id: crate::system_key::SYSTEM_KEY_ID.to_string(),
+            name: "BUDDY_SWITCH_AUTH_KEY".to_string(),
+            variant,
+            prefix: String::new(),
+            suffix: String::new(),
+            hash: String::new(),
+            plaintext: None,
+            created_at: 0,
+            revoked_at: None,
+            last_used_at: None,
+            quota_mode: QuotaMode::default(),
+            quota_limit: 0,
+            quota_unit: QuotaUnit::default(),
+            quota_period: QuotaPeriod::default(),
+            scope_mode: ScopeMode::default(),
+            scope_accounts: Vec::new(),
+            scope_groups: Vec::new(),
+        }
+    }
+
     /// 列表视图（**不含 hash**，含可空 `plaintext`）。
     pub fn masked(&self) -> Value {
         json!({
