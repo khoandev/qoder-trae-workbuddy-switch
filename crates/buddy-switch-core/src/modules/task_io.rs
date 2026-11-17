@@ -205,7 +205,7 @@ pub async fn send(
                     "code": ADMISSION_BLOCKED_CODE,
                     "message": format!("风控准入拦截：{error}"),
                 }),
-            )
+            );
         }
     };
     let headers = outbound_headers(account, region, extra_headers);
